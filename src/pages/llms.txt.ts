@@ -4,12 +4,13 @@ import { canonical } from '../lib/seo';
 
 export async function GET() {
   const guides = await getCollection('guides');
+  const homeUrl = canonical('/');
   const lines: string[] = [
     '# Agent Integration Playbook',
     '',
     '> Open reference on connecting AI agents to real systems: tool integrations, OAuth and identity, least-privilege scopes, audit trails, and production failure modes. Prose is CC BY 4.0.',
     '',
-    '- [Agent Integration Playbook](https://agenticfabriq.github.io/): An open reference for connecting AI agents to real systems: tool integrations, OAuth and identity, least privilege, audit trails, and production failure modes.',
+    `- [Agent Integration Playbook](${homeUrl}): An open reference for connecting AI agents to real systems: tool integrations, OAuth and identity, least privilege, audit trails, and production failure modes.`,
     '',
   ];
 
