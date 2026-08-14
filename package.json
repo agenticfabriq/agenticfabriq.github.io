@@ -1,0 +1,28 @@
+{
+  "name": "agenticfabriq-playbook",
+  "type": "module",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "test": "vitest run",
+    "lint:md": "markdownlint-cli2 \"src/content/**/*.md\" \"*.md\"",
+    "check:links": "node scripts/check-links.mjs",
+    "check:samples": "node scripts/check-samples.mjs",
+    "verify": "npm run build && npm run test && npm run lint:md && npm run check:links && npm run check:samples"
+  },
+  "dependencies": {
+    "astro": "7.2.2",
+    "@astrojs/sitemap": "3.7.3",
+    "@astrojs/rss": "4.0.19"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10",
+    "cheerio": "1.2.0",
+    "fast-glob": "3.3.3",
+    "linkinator": "8.0.3",
+    "markdownlint-cli2": "0.23.2"
+  }
+}
