@@ -16,4 +16,4 @@ relatedGuides:
 
 ## TL;DR
 
-Full content lands in Task 12.
+Full content lands in Task 12. For a worked example of scoping an agent's access down to what a task actually needs, see [connecting an agent to Gmail](/connect/gmail/).

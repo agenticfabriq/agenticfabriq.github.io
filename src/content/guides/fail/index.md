@@ -16,4 +16,4 @@ relatedGuides:
 
 ## TL;DR
 
-Full content lands in Task 13.
+Full content lands in Task 13. For a look at the scopes an over-permissioned agent integration can end up with, see [connecting an agent to Gmail](/connect/gmail/).
