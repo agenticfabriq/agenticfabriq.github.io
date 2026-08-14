@@ -13,7 +13,7 @@ interface Props {
 const { entry } = Astro.props;
 const data = entry.data;
 const pillar = getPillar(data.pillar)!;
-const path = `/${entry.id}/`;
+const path = `/${entry.id.replace(/\/index$/, '')}/`;
 const url = canonical(path);
 const { Content } = await render(entry);
 
