@@ -1,0 +1,17 @@
+---
+import { getCollection } from 'astro:content';
+import GuideLayout from '../../layouts/GuideLayout.astro';
+
+export async function getStaticPaths() {
+  const guides = await getCollection('guides');
+  return guides
+    .filter((entry) => !entry.data.cornerstone)
+    .map((entry) => {
+      const [pillar, slug] = entry.id.split('/');
+      return { params: { pillar, slug }, props: { entry } };
+    });
+}
+
+const { entry } = Astro.props;
+---
+<GuideLayout entry={entry} />

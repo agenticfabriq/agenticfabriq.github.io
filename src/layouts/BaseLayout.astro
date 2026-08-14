@@ -1,0 +1,40 @@
+---
+import Seo from '../components/Seo.astro';
+import { PILLARS } from '../lib/pillars';
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  jsonLd?: object[];
+}
+
+const { title, description, path, jsonLd } = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="alternate" type="application/rss+xml" title="Agent Integration Playbook" href="/rss.xml" />
+    <Seo title={title} description={description} path={path} jsonLd={jsonLd} />
+  </head>
+  <body>
+    <header class="site">
+      <a href="/"><strong>Agent Integration Playbook</strong></a>
+      <nav>
+        {PILLARS.map((pillar) => <a href={`/${pillar.slug}/`}>{pillar.title}</a>)}
+      </nav>
+    </header>
+    <main><slot /></main>
+    <footer class="site">
+      <p>
+        Maintained by <a href="https://agenticfabriq.com">Agentic Fabriq</a>.
+        Prose licensed <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>,
+        code <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache-2.0</a>.
+        <a href="https://github.com/agenticfabriq/agenticfabriq.github.io">Improve this page on GitHub</a>.
+      </p>
+    </footer>
+  </body>
+</html>

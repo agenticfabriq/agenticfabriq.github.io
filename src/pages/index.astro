@@ -1,7 +1,32 @@
 ---
-import '../styles/global.css';
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { PILLARS } from '../lib/pillars';
+import { canonical, organizationJsonLd, breadcrumbJsonLd } from '../lib/seo';
+
+const guides = await getCollection('guides');
+const byPillar = (slug: string) => guides.filter((g) => g.data.pillar === slug && !g.data.cornerstone);
 ---
-<html lang="en">
-  <head><meta charset="utf-8" /><title>Agent Integration Playbook</title></head>
-  <body><main><h1>Agent Integration Playbook</h1></main></body>
-</html>
+<BaseLayout
+  title="Agent Integration Playbook"
+  description="An open reference for connecting AI agents to real systems: tool integrations, OAuth and identity, least privilege, audit trails, and production failure modes."
+  path="/"
+  jsonLd={[organizationJsonLd(), breadcrumbJsonLd([{ name: 'Playbook', url: canonical('/') }])]}
+>
+  <h1>Agent Integration Playbook</h1>
+  <p>
+    Practical, vendor-neutral guides on giving AI agents access to real systems without
+    leaking credentials or handing over more than they need.
+  </p>
+  {PILLARS.map((pillar) => (
+    <section>
+      <h2><a href={`/${pillar.slug}/`}>{pillar.title}</a></h2>
+      <p>{pillar.blurb}</p>
+      <ul>
+        {byPillar(pillar.slug).map((guide) => (
+          <li><a href={`/${guide.id}/`}>{guide.data.title}</a></li>
+        ))}
+      </ul>
+    </section>
+  ))}
+</BaseLayout>

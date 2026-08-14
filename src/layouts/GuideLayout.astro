@@ -1,0 +1,46 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import { getEntry, render } from 'astro:content';
+import BaseLayout from './BaseLayout.astro';
+import Breadcrumbs from '../components/Breadcrumbs.astro';
+import { getPillar } from '../lib/pillars';
+import { canonical, articleJsonLd, breadcrumbJsonLd } from '../lib/seo';
+
+interface Props {
+  entry: CollectionEntry<'guides'>;
+}
+
+const { entry } = Astro.props;
+const data = entry.data;
+const pillar = getPillar(data.pillar)!;
+const path = `/${entry.id}/`;
+const url = canonical(path);
+const { Content } = await render(entry);
+
+const trail = [
+  { name: 'Playbook', url: canonical('/') },
+  { name: pillar.title, url: canonical(`/${pillar.slug}/`) },
+  { name: data.title, url },
+];
+
+const related = (
+  await Promise.all(data.relatedGuides.map((id) => getEntry('guides', id)))
+).filter(Boolean) as CollectionEntry<'guides'>[];
+---
+<BaseLayout
+  title={data.title}
+  description={data.description}
+  path={path}
+  jsonLd={[articleJsonLd({ ...data, url }), breadcrumbJsonLd(trail)]}
+>
+  <Breadcrumbs trail={trail} />
+  <h1>{data.title}</h1>
+  <p style="color:var(--ink-soft);font-size:.9rem;">Updated {data.updated}</p>
+  <Content />
+  <h2>Further reading</h2>
+  <ul>
+    {related.map((guide) => (
+      <li><a href={`/${guide.id}/`}>{guide.data.title}</a></li>
+    ))}
+  </ul>
+</BaseLayout>

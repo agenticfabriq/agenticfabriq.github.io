@@ -1,0 +1,10 @@
+---
+interface Props {
+  kind?: 'note' | 'warning';
+}
+const { kind = 'note' } = Astro.props;
+const border = kind === 'warning' ? '#c2410c' : 'var(--line)';
+---
+<aside style={`border-left:3px solid ${border};padding:.75rem 1rem;margin:1.25rem 0;background:var(--bg-soft);`}>
+  <slot />
+</aside>
