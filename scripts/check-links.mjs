@@ -16,7 +16,9 @@ for (const file of files) {
   $('a[href]').each((_, element) => {
     const href = $(element).attr('href');
     if (!href || /^(https?:|mailto:|#)/.test(href)) return;
-    const target = href.endsWith('/') ? href : `${href}/`;
+    const { pathname } = new URL(href, 'https://placeholder.invalid');
+    if (/\.[^/.]+$/.test(pathname)) return; // asset (e.g. /llms.txt, /rss.xml), not a route
+    const target = pathname.endsWith('/') ? pathname : `${pathname}/`;
     internal.push(target);
     linkedTo.add(target);
     if (!routes.has(target)) failures.push(`${route} -> broken internal link ${href}`);
