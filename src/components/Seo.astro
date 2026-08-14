@@ -6,15 +6,16 @@ interface Props {
   description: string;
   path: string;
   jsonLd?: object[];
+  ogType?: string;
 }
 
-const { title, description, path, jsonLd = [] } = Astro.props;
+const { title, description, path, jsonLd = [], ogType = 'article' } = Astro.props;
 const url = canonical(path);
 ---
 <title>{title}</title>
 <meta name="description" content={description} />
 <link rel="canonical" href={url} />
-<meta property="og:type" content="article" />
+<meta property="og:type" content={ogType} />
 <meta property="og:title" content={title} />
 <meta property="og:description" content={description} />
 <meta property="og:url" content={url} />
@@ -23,5 +24,5 @@ const url = canonical(path);
 <meta name="twitter:title" content={title} />
 <meta name="twitter:description" content={description} />
 {jsonLd.map((block) => (
-  <script type="application/ld+json" set:html={JSON.stringify(block)} />
+  <script type="application/ld+json" set:html={JSON.stringify(block).replace(/</g, '\\u003c')} />
 ))}

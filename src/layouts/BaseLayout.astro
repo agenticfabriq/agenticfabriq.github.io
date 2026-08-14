@@ -8,9 +8,10 @@ interface Props {
   description: string;
   path: string;
   jsonLd?: object[];
+  ogType?: string;
 }
 
-const { title, description, path, jsonLd } = Astro.props;
+const { title, description, path, jsonLd, ogType } = Astro.props;
 ---
 <!doctype html>
 <html lang="en">
@@ -18,7 +19,7 @@ const { title, description, path, jsonLd } = Astro.props;
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="alternate" type="application/rss+xml" title="Agent Integration Playbook" href="/rss.xml" />
-    <Seo title={title} description={description} path={path} jsonLd={jsonLd} />
+    <Seo title={title} description={description} path={path} jsonLd={jsonLd} ogType={ogType} />
   </head>
   <body>
     <header class="site">
