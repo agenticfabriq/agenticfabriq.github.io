@@ -9,6 +9,8 @@ export async function GET() {
     '',
     '> Open reference on connecting AI agents to real systems: tool integrations, OAuth and identity, least-privilege scopes, audit trails, and production failure modes. Prose is CC BY 4.0.',
     '',
+    '- [Agent Integration Playbook](https://agenticfabriq.github.io/): An open reference for connecting AI agents to real systems: tool integrations, OAuth and identity, least privilege, audit trails, and production failure modes.',
+    '',
   ];
 
   for (const pillar of PILLARS) {
