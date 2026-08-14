@@ -17,11 +17,16 @@ const path = `/${entry.id.replace(/\/index$/, '')}/`;
 const url = canonical(path);
 const { Content } = await render(entry);
 
-const trail = [
-  { name: 'Playbook', url: canonical('/') },
-  { name: pillar.title, url: canonical(`/${pillar.slug}/`) },
-  { name: data.title, url },
-];
+const trail = data.cornerstone
+  ? [
+      { name: 'Playbook', url: canonical('/') },
+      { name: data.title, url },
+    ]
+  : [
+      { name: 'Playbook', url: canonical('/') },
+      { name: pillar.title, url: canonical(`/${pillar.slug}/`) },
+      { name: data.title, url },
+    ];
 
 const related = (
   await Promise.all(data.relatedGuides.map((id) => getEntry('guides', id)))
