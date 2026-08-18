@@ -74,7 +74,7 @@ Before the code, the mapping that decides everything else. Each grant answers a 
 
 - **`authorization_code`** answers *the agent acts for a person who consented*. A human sees a consent screen, and the resulting token carries their identity. Add PKCE, always.
 - **`client_credentials`** answers *the agent acts as itself*. No user, no consent screen, no delegation. [RFC 6749 section 4.4.2](https://www.rfc-editor.org/rfc/rfc6749#section-4.4.2) sets `grant_type` to the literal `client_credentials`, section 4.4 restricts the grant to confidential clients, and [section 4.4.3](https://www.rfc-editor.org/rfc/rfc6749#section-4.4.3) says "A refresh token SHOULD NOT be included" — the client can simply authenticate again. Use it for the agent's own housekeeping: reading its own configuration, writing its own telemetry, polling a queue that belongs to it.
-- **Token exchange** answers *the agent received one token and needs a different, narrower one*. It is the flow that lets an agent call a second service without handing over everything the first one gave it, and it is the flow most teams have never used.
+- **Token exchange** answers *the agent received one token and needs a different, narrower one*. It lets an agent call a second service without handing over everything the first one gave it.
 
 The path below runs authorization code with PKCE end to end and then exchanges the result. It targets Keycloak, which implements the standard token exchange and starts in one command in dev mode — see [Keycloak's getting-started page](https://www.keycloak.org/getting-started/getting-started-docker) for the exact invocation. Any authorization server that publishes discovery metadata and supports the exchange grant will do; the provider-specific claims below are marked as such. Every parameter is spelled the way its RFC spells it. Runnable sources: `examples/govern-oauth-flows/pkce_authorization_code.py`, `examples/govern-oauth-flows/token_exchange.py`, and the shared HTTP helpers in `examples/govern-oauth-flows/oauth_http.py`.
 
@@ -233,6 +233,8 @@ The response, per [section 2.2.1](https://www.rfc-editor.org/rfc/rfc8693#section
 
 There is one more parameter, and it is the reason this section belongs in a governance guide rather than a protocol reference. `actor_token` carries the identity of the acting party, and when it is present the authorization server may mint a composite token: [RFC 8693 section 1.1](https://www.rfc-editor.org/rfc/rfc8693#section-1.1) draws the line between *impersonation*, where the acting party "is indistinguishable from B in that context", and *delegation*, where "principal A still has its own identity separate from B" and it is understood that A is acting for B. Forwarding a user's token is impersonation, and it is why your downstream logs say a human did it. Token exchange with an actor token is delegation, and it is the difference between a log line that names a person and one that names an agent acting for a person. In a JWT that shows up as the `act` claim, defined in [RFC 8693 section 4.1](https://www.rfc-editor.org/rfc/rfc8693#section-4.1), which nests to record a chain of actors and which consumers "MUST only consider the token's top-level claims and the party identified as the current actor" when making access decisions.
 
+Check what your server actually does with `actor_token` before you build on it, because this is the least evenly implemented part of RFC 8693. Keycloak — the server this walkthrough targets — documents support for impersonation and *experimental* support for delegation, behind a `token-exchange-delegation` feature flag that also requires `parameterized-scopes`, and its own documentation says not to use it in production. Its delegation model is also not the one above: rather than the actor presenting an `actor_token`, the subject pre-authorizes a named actor and Keycloak records that as the `may_act` claim of [RFC 8693 section 4.4](https://www.rfc-editor.org/rfc/rfc8693#section-4.4). So `actor_token` is the right thing to reach for and the spec is unambiguous about what it means, but on a given server today you may get impersonation semantics whatever you send. The example prints the `act` claim of the issued token precisely so you can see which one you got.
+
 ### 7. Verify the exchanged token is actually narrower
 
 Nothing in RFC 8693 says the issued token must carry fewer rights than the subject token. The specification defines a general security token service, and an authorization server is free to issue a token with scopes the subject token never had. Keycloak states this outright — token exchange there can request extra scopes not present in the initial `subject_token` unless you attach the `downscope-assertion-grant-enforcer` client policy executor — and its `audience` parameter filters audiences down while its `scope` parameter can add optional client scopes on the way up.
@@ -241,14 +243,25 @@ So check, in the client, on every exchange:
 
 ```python
 def assert_narrower(response, subject_scopes: set[str], requested_scope: str | None) -> set[str]:
-    # RFC 8693 section 2.2.1: `scope` is OPTIONAL only when it is identical to
-    # what was requested, so its absence means the request was honoured exactly.
-    issued = set(response["scope"].split()) if "scope" in response else set((requested_scope or "").split())
+    if "scope" in response:
+        issued = set(response["scope"].split())
+    elif requested_scope:
+        # RFC 8693 section 2.2.1: `scope` is OPTIONAL only when it is identical
+        # to what was requested, so absence means it was honoured exactly.
+        issued = set(requested_scope.split())
+    else:
+        # That inference needs something to be identical *to*. Request no scope
+        # and an absent `scope` carries no information, so there is nothing to
+        # verify -- and an unverifiable exchange is not a verified-narrow one.
+        raise NotNarrower("cannot verify narrowing: send an explicit `scope`")
+
     gained = sorted(issued - subject_scopes)
     if gained:
         raise NotNarrower(f"exchange added scopes absent from the subject token: {', '.join(gained)}")
     return issued
 ```
+
+The `else` branch is the one worth dwelling on, because the obvious implementation returns an empty set there and passes. An empty set minus anything is empty, so the check reports success on precisely the request that told it nothing — and the token you just waved through may still carry the user's entire grant. Send a `scope` on every exchange, and make the absence of one an error rather than a default.
 
 Then check the audience, because scope alone does not stop replay. [RFC 9700 section 2.3](https://www.rfc-editor.org/rfc/rfc9700#section-2.3) says access tokens SHOULD be audience-restricted to a specific resource server, or failing that to a small set, and puts the enforcement duty on the resource server: it "is obliged to verify, for every request, whether the access token sent with that request was meant to be used for that particular resource server. If it was not, the resource server MUST refuse to serve the respective request." For JWT access tokens, [RFC 9068 section 4](https://www.rfc-editor.org/rfc/rfc9068#section-4) states the rule as a hard requirement on the receiving side: the token "MUST be rejected if `aud` does not contain a resource indicator of the current resource server as a valid audience."
 
@@ -262,7 +275,7 @@ The same section says the authorization server MAY issue a new refresh token, "i
 
 The alarm is the point. [RFC 6749 section 10.4](https://www.rfc-editor.org/rfc/rfc6749#section-10.4) describes rotation as a way to detect refresh token abuse: a new refresh token is issued with every refresh, the previous one is invalidated but retained, and "if a refresh token is compromised and subsequently used by both the attacker and the legitimate client, one of them will present an invalidated refresh token, which will inform the authorization server of the breach." That is the only mechanism in ordinary OAuth that surfaces a stolen refresh token at all. Without it, a copied refresh token works quietly for as long as the grant lives, and nothing anywhere ever notices.
 
-Note the strength of the language, because this is where blog posts overstate. RFC 6749 offers rotation as an example of what a server "could employ". [RFC 9700 section 4.14.2](https://www.rfc-editor.org/rfc/rfc9700#section-4.14.2) hardens it, and note exactly how far: authorization servers "MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients" — sender-constrained refresh tokens or rotation. The mandate stops at public clients. For confidential clients neither document mandates rotation; RFC 6749 already binds the refresh token to the authenticated client. Most large providers rotate for everyone anyway, which is convention rather than requirement, so write your client to survive a rotating server and a non-rotating one without configuration.
+Note the strength of the language, because this is where blog posts overstate. RFC 6749 offers rotation as an example of what a server "could employ". [RFC 9700 section 4.14.2](https://www.rfc-editor.org/rfc/rfc9700#section-4.14.2) hardens it, and note exactly how far: authorization servers "MUST utilize one of these methods to detect refresh token replay by malicious actors for public clients" — sender-constrained refresh tokens or rotation. The mandate stops at public clients. For confidential clients neither document mandates rotation; RFC 6749 already binds the refresh token to the authenticated client. Plenty of servers rotate for every client type regardless, which is a deployment choice rather than a requirement — so do not infer from "my provider rotates" that rotation is mandated, and write your client to survive a rotating server and a non-rotating one without configuration.
 
 What a well-behaved client does when a refresh fails:
 
@@ -293,7 +306,7 @@ The rule of thumb: if a human authorized it, start with authorization code; if n
 - [ ] A consent record exists per grant, holding issuer, client id, user, requested scope, granted scope, and timestamp — and the user can see it.
 - [ ] No `Authorization: Bearer` header received by a service is ever copied into an outbound request to another service.
 - [ ] Every downstream call uses a token obtained by exchange, carrying an `audience` or `resource` naming exactly one target.
-- [ ] The client asserts the exchanged token's scope is a subset of the subject token's scope, and fails closed when it is not.
+- [ ] The client asserts the exchanged token's scope is a subset of the subject token's scope, and fails closed both when it is not and when the response gives it nothing to compare.
 - [ ] Resource servers validate `aud` on every request and reject tokens minted for someone else.
 - [ ] A rotated refresh token replaces the old one atomically, and the old value is not retained as a fallback.
 - [ ] `invalid_grant` on a refresh token you believe is current raises an alert, not a re-consent prompt.
@@ -308,7 +321,7 @@ The rule of thumb: if a human authorized it, start with authorization code; if n
 
 **Cause:** token pass-through. The agent forwarded the `Authorization` header it received instead of exchanging it, so the downstream received the full user grant and the user's identity along with it.
 
-**Fix:** exchange at the boundary. Every hop that crosses a service boundary gets its own token with its own `audience` and its own reduced `scope`, and the agent's identity travels as `actor_token` so the resulting token expresses delegation rather than impersonation. Then make the pass-through impossible to reintroduce: a shared HTTP client that refuses to send an inbound bearer token onward is a twenty-line change that holds the line better than a code review guideline.
+**Fix:** exchange at the boundary. Every hop that crosses a service boundary gets its own token with its own `audience` and its own reduced `scope`, and the agent's identity travels as `actor_token` so the resulting token expresses delegation rather than impersonation — subject to the server-support caveat in step 6, so verify the `act` claim rather than assuming it. Then make the pass-through impossible to reintroduce: a shared HTTP client that refuses to send an inbound bearer token onward is a twenty-line change that holds the line better than a code review guideline.
 
 ### The exchange returns a token with more authority than the one you handed in
 
@@ -316,7 +329,7 @@ The rule of thumb: if a human authorized it, start with authorization code; if n
 
 **Cause:** you assumed RFC 8693 means "downscope". It does not — it means "exchange". The authorization server decides what to issue, and the default in at least one widely deployed server is that the `scope` parameter can add optional client scopes the subject token never carried.
 
-**Fix:** two layers. Server side, turn on whatever downscoping enforcement your provider offers — Keycloak's is the `downscope-assertion-grant-enforcer` client policy executor. Client side, compare issued scope to subject scope on every exchange and fail closed, as `assert_narrower` in `examples/govern-oauth-flows/token_exchange.py` does. Do not rely on either alone: the server-side control is a configuration that can be turned off by someone who does not know why it was on.
+**Fix:** two layers. Server side, turn on whatever downscoping enforcement your provider offers — step 7 names Keycloak's. Client side, compare issued scope to subject scope on every exchange and fail closed, as `assert_narrower` in `examples/govern-oauth-flows/token_exchange.py` does. Do not rely on either alone: the server-side control is a configuration that can be turned off by someone who does not know why it was on.
 
 ### The exchange fails with `invalid_request` and no useful detail
 
@@ -415,6 +428,6 @@ Primary sources for everything asserted above:
 - [RFC 8707 — Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707#section-2) — the `resource` parameter and audience-restricting issued tokens.
 - [RFC 7009 — Token Revocation](https://www.rfc-editor.org/rfc/rfc7009#section-2.1) — `token`, `token_type_hint`, propagation delay, and cascading revocation.
 - [RFC 8252 — OAuth 2.0 for Native Apps](https://www.rfc-editor.org/rfc/rfc8252#section-7.3) — loopback interface redirection for locally run clients.
-- [Keycloak: configuring and using token exchange](https://www.keycloak.org/securing-apps/token-exchange) — the provider-specific facts cited above: `audience` support, absent `resource` support, the confidential-client requirement, the `aud` precondition on the subject token, and the `downscope-assertion-grant-enforcer` executor.
+- [Keycloak: configuring and using token exchange](https://www.keycloak.org/securing-apps/token-exchange) — the provider-specific facts cited above: `audience` support, absent `resource` support, the confidential-client requirement, the `aud` precondition on the subject token, the `downscope-assertion-grant-enforcer` executor, and the experimental status of delegation support.
 
 One note on a document you will be pointed at: OAuth 2.1 consolidates most of the advice above into a single specification, but as of its fifteenth revision in March 2026 it is [an Internet-Draft](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/), not an RFC. Cite RFC 9700 when you need something a reviewer will accept as current.

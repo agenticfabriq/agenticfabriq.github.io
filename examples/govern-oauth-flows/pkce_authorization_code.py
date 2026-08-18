@@ -32,7 +32,7 @@ import json
 import os
 import secrets
 import sys
-import threading
+import time
 import urllib.parse
 import webbrowser
 
@@ -80,7 +80,7 @@ def require_s256(metadata: dict) -> None:
 
 
 class _CallbackHandler(http.server.BaseHTTPRequestHandler):
-    """Single-shot loopback receiver for the redirect (RFC 8252 section 7.3)."""
+    """Loopback receiver for the redirect (RFC 8252 section 7.3)."""
 
     result: dict[str, str] = {}
 
@@ -100,15 +100,28 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         """Silence the default stderr access log; it would print the code."""
 
 
-def wait_for_redirect() -> dict[str, str]:
-    """Serve exactly one request on the loopback redirect URI."""
+def wait_for_redirect(timeout_seconds: float = 300.0) -> dict[str, str]:
+    """Serve loopback requests until the authorization response arrives.
+
+    Serving exactly one request would be wrong: browsers speculatively fetch
+    /favicon.ico, and any stray GET would be consumed by the 404 branch, end
+    the wait, and make a perfectly healthy run report a timeout it never had.
+    Keep serving until the callback actually lands or the deadline passes.
+    """
+    deadline = time.monotonic() + timeout_seconds
     server = http.server.HTTPServer((REDIRECT_HOST, REDIRECT_PORT), _CallbackHandler)
-    thread = threading.Thread(target=server.handle_request, daemon=True)
-    thread.start()
-    thread.join(timeout=300)
-    server.server_close()
-    if not _CallbackHandler.result:
-        raise TimeoutError("no authorization response arrived within 300 seconds")
+    server.timeout = 1.0
+    try:
+        while not _CallbackHandler.result:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"no authorization response on {REDIRECT_URI} within {timeout_seconds:.0f} seconds"
+                )
+            # handle_request() returns after server.timeout with no request,
+            # which is what lets the deadline above actually be checked.
+            server.handle_request()
+    finally:
+        server.server_close()
     return _CallbackHandler.result
 
 
