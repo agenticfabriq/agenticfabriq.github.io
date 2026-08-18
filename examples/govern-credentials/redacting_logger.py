@@ -12,7 +12,11 @@ Three demonstrations, each printing what actually reaches the log stream:
      from its descendants;
   C. a redacting Formatter on the handler — catches the message, the %-style
      arguments, and the traceback, because it runs after all three have been
-     rendered into one string.
+     rendered into one string;
+  E. the same formatter on one of two handlers — leaks, because a record goes
+     to every handler of its logger and of every ancestor logger, and each one
+     renders it with its own formatter. "A formatter" is not the invariant;
+     "every handler that can receive a record" is.
 
 Run it:  python3 redacting_logger.py
 """
@@ -36,8 +40,11 @@ class SecretRegistry:
         self._values: set[str] = set()
 
     def register(self, value: str) -> str:
-        if len(value) >= 8:  # never register something short enough to be noise
-            self._values.add(value)
+        # Refuse loudly rather than silently. A caller that believes it
+        # registered a credential and did not is demo D, and demo D leaks.
+        if len(value) < 8:
+            raise ValueError("refusing to register a value shorter than 8 characters")
+        self._values.add(value)
         return value
 
     def forget(self, value: str) -> None:
@@ -128,6 +135,34 @@ def fresh_stream(*, formatter: logging.Formatter | None = None,
     return buffer
 
 
+def demo_two_handlers(token: str) -> None:
+    """One formatter is not every formatter."""
+    redacted, other = io.StringIO(), io.StringIO()
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        root.removeHandler(existing)
+    for existing in list(root.filters):
+        root.removeFilter(existing)
+    root.setLevel(logging.DEBUG)
+
+    guarded = logging.StreamHandler(redacted)
+    guarded.setFormatter(RedactingFormatter(REGISTRY))
+    # The handler a crash reporter, a log-export SDK, or your framework's own
+    # file logging attaches beside yours. It renders with its own formatter and
+    # never consults yours.
+    unguarded = logging.StreamHandler(other)
+    unguarded.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+    root.addHandler(guarded)
+    root.addHandler(unguarded)
+
+    logging.getLogger("agent").info("issued credential %s", token)
+    leaked = token in other.getvalue()
+    print(f"-- E. formatter on one of two handlers: {'LEAKED' if leaked else 'clean'}")
+    print(f"     redacted handler: {redacted.getvalue().strip()}")
+    print(f"     other handler:    {other.getvalue().strip()}")
+    print()
+
+
 def report(title: str, buffer: io.StringIO, token: str) -> None:
     body = buffer.getvalue()
     verdict = "LEAKED" if token in body else "clean"
@@ -173,6 +208,9 @@ def main() -> None:
     except RuntimeError:
         app_log.exception("upstream call failed")
     report("C. RedactingFormatter on the handler, logging.exception", buffer, token)
+
+    # E. The same formatter, on one of the two handlers this logger reaches.
+    demo_two_handlers(token)
 
     # The formatter is only as good as the registry. Forget a value and it
     # travels again, which is why issuance and redaction share one registry.

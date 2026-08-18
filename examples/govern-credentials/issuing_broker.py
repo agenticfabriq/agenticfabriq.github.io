@@ -22,6 +22,7 @@ Run it:  python3 issuing_broker.py
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -211,24 +212,43 @@ class Resource:
     revoked_jti: set[str] = field(default_factory=set)
 
     def authorize(self, token: str, subject: str) -> dict:
+        # Everything up to the signature check runs on bytes an unauthenticated
+        # caller chose, so every parse failure has to leave this method as a
+        # Denied. A verifier that lets a decoder exception escape returns a 500
+        # where it owed a 401, and drags the attacker's token into a traceback
+        # on the way out -- the log path redacting_logger.py demo D shows a
+        # value-based redactor cannot cover.
         try:
             version, kid, body, signature = token.split(".")
-        except ValueError as exc:
-            raise Denied("malformed credential") from exc
-        if version != "v1":
-            raise Denied(f"unsupported credential version {version!r}")
+            if version != "v1":
+                raise Denied(f"unsupported credential version {version!r}")
 
-        key = self.keyring.keys.get(kid)
-        if key is None:
-            # Either the key was retired (rotation finished) or it was never
-            # ours. Both are the same rejection from here.
-            raise Denied(f"signing key {kid!r} is not accepted")
+            key = self.keyring.keys.get(kid)
+            if key is None:
+                # Either the key was retired (rotation finished) or it was never
+                # ours. Both are the same rejection from here.
+                raise Denied(f"signing key {kid!r} is not accepted")
 
-        expected = hmac.new(key, body.encode("ascii"), hashlib.sha256).digest()
-        if not hmac.compare_digest(expected, _unb64u(signature)):
-            raise Denied("signature does not verify")
+            expected = hmac.new(key, body.encode("ascii"), hashlib.sha256).digest()
+            if not hmac.compare_digest(expected, _unb64u(signature)):
+                raise Denied("signature does not verify")
 
-        payload = json.loads(_unb64u(body))
+            payload = json.loads(_unb64u(body))
+        except Denied:
+            raise
+        except (ValueError, binascii.Error, UnicodeError, TypeError) as exc:
+            # binascii.Error subclasses ValueError on CPython; naming both keeps
+            # this from quietly depending on that.
+            reason = type(exc).__name__
+            if type(exc).__module__ not in ("builtins", "__main__"):
+                reason = f"{type(exc).__module__}.{reason}"
+            raise Denied(f"malformed credential ({reason})") from exc
+
+        # Only reachable once the signature verified, so this payload is one we
+        # minted -- but a claim check that can raise KeyError is still a claim
+        # check that can crash the boundary.
+        if not isinstance(payload, dict) or not {"sub", "res", "exp", "jti"} <= payload.keys():
+            raise Denied("credential is missing required claims")
         if payload["exp"] <= self.clock():
             raise Denied("credential expired")
         if payload["jti"] in self.revoked_jti:
@@ -299,6 +319,18 @@ def main() -> None:
         orders.authorize(leaked.token, subject="bo@example.com")
     except Denied as exc:
         print(f"  db:orders rejected it for another subject: {exc}")
+
+    print("\n== malformed input is denied, never raised ==")
+    for label, bad in [
+        ("one-character signature", "v1.k1.eyJ4IjoxfQ.A"),
+        ("non-base64 body", "v1.k1.@@@@.AAAA"),
+        ("two segments", "v1.k1"),
+        ("unknown version", "v2.k1.eyJ4IjoxfQ.AAAA"),
+    ]:
+        try:
+            orders.authorize(bad, subject="amara@example.com")
+        except Denied as exc:
+            print(f"  {label:24} -> Denied: {exc}")
 
     print("\n== revocation is not rotation ==")
     orders.revoke(leaked.jti)
