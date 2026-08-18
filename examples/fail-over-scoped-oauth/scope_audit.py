@@ -23,12 +23,13 @@ The audit in three parts:
 
   3. VERDICT   Two findings, because they have different fixes:
                  UNEXERCISED  granted, and no observed call accepts it. Delete.
-                 NARROWABLE   granted and load-bearing, but a scope with
-                              strictly smaller REACH would have covered every
-                              call it carried. Swap it down.
+                 NARROWABLE   granted and load-bearing, but a scope over the
+                              same corpus with strictly smaller REACH would
+                              have covered every call it carried. Swap it down.
 
                Candidates are ranked by reach, not by the provider's capability
-               tier. See the comment on SCOPE_PROFILE for why that matters.
+               tier, and a candidate must address the same corpus. See the
+               comments on SCOPE_PROFILE for why both rules are needed.
 
 Three ways to run it:
 
@@ -55,7 +56,7 @@ import argparse
 import json
 import sys
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 DIRECTORY_TOKENS_URL = "https://admin.googleapis.com/admin/directory/v1/users/{user}/tokens"
 REPORTS_TOKEN_ACTIVITY_URL = (
@@ -67,6 +68,8 @@ REPORTS_TOKEN_ACTIVITY_URL = (
 # unexercised only because its call has not landed in the log yet.
 MAX_WINDOW_DAYS = 180
 LAG_EXCLUSION_DAYS = 1
+
+UNKNOWN_CORPUS = "unknown"
 
 
 class AuditInconclusive(Exception):
@@ -82,99 +85,152 @@ class AuditInconclusive(Exception):
         super().__init__("; ".join(self.reasons))
 
 
-# scope -> (reach rank, provider's classification, what it actually reaches).
+class ScopeProfile(NamedTuple):
+    """reach: smaller is less reachable. corpus: WHICH resources, not how many."""
+
+    reach: int
+    classification: str
+    corpus: str
+    reaches: str
+
+
+# TWO independent properties decide whether one scope may replace another.
 #
-# RANK IS BY REACH, NOT BY CAPABILITY TIER. That distinction is the whole point.
-# drive.metadata.readonly sits one rung below drive.readonly on Google's
-# capability ladder, but it still enumerates every file in corpora=user, so
-# swapping one for the other barely moves the blast radius. drive.file is
-# non-sensitive AND bounded to files the user hands over through the picker, so
-# it is the real narrowing. A tool that ranked by tier would recommend the first
-# swap and call the audit done, which is how a team ships a "narrowing" that
-# changes nothing measurable.
+# REACH ranks how much of a corpus a scope exposes. Rank by reach, not by the
+# provider's capability tier: drive.metadata.readonly sits one rung below
+# drive.readonly on Google's ladder but still enumerates every file in
+# corpora=user, so that swap barely moves the blast radius, while drive.file is
+# non-sensitive and bounded to what the user hands over.
 #
-# The ranks are a judgement about reach and you should edit them for your own
-# data model. The classifications are the provider's own, from the Drive and
-# Gmail scope references.
-SCOPE_PROFILE: dict[str, tuple[int, str, str]] = {
-    "https://www.googleapis.com/auth/drive.appdata": (
-        0, "non-sensitive", "the app's own configuration data only"),
-    "https://www.googleapis.com/auth/drive.file": (
-        1, "non-sensitive", "only files the user hands over via the picker"),
-    "https://www.googleapis.com/auth/drive.metadata.readonly": (
-        2, "restricted", "metadata for every file in corpora=user"),
-    "https://www.googleapis.com/auth/drive.metadata": (
-        3, "restricted", "metadata for every file in corpora=user, read and write"),
-    "https://www.googleapis.com/auth/drive.readonly": (
-        4, "restricted", "content of every file in corpora=user"),
-    "https://www.googleapis.com/auth/drive": (
-        5, "restricted", "every file in corpora=user, including delete"),
-    "https://www.googleapis.com/auth/gmail.send": (
-        1, "sensitive", "nothing that already exists; send only"),
-    "https://www.googleapis.com/auth/gmail.metadata": (
-        2, "restricted", "headers and labels for every message, never bodies"),
-    "https://www.googleapis.com/auth/gmail.readonly": (
-        3, "restricted", "every message in the mailbox"),
-    "https://www.googleapis.com/auth/gmail.modify": (
-        4, "restricted", "every message, plus compose, send and trash"),
-    "https://mail.google.com/": (
-        5, "restricted", "every message, including permanent deletion"),
+# CORPUS names WHICH resources a scope addresses. Without it, a plain
+# minimum-by-reach recommends drive.appdata for files.list -- it really is on
+# that method's accepted-scope list and really does have the smallest reach --
+# and it would break the agent instantly, because it addresses the app's own
+# hidden folder and none of the user's files. A candidate must share the
+# corpus of the scope it replaces. That is a structural rule rather than a
+# denylist, so a special-purpose scope added later cannot slip through by
+# being given a low rank.
+#
+# The reach ranks and the corpus labels are both judgements about the data
+# model and you should edit them for yours. The `classification` column is the
+# provider's own, from the Drive and Gmail scope references.
+SCOPE_PROFILE: dict[str, ScopeProfile] = {
+    # --- the user's own Drive corpus ---
+    "https://www.googleapis.com/auth/drive.file": ScopeProfile(
+        1, "non-sensitive", "user-drive", "only files the user hands over via the picker"),
+    "https://www.googleapis.com/auth/drive.metadata.readonly": ScopeProfile(
+        2, "restricted", "user-drive", "metadata for every file in corpora=user"),
+    "https://www.googleapis.com/auth/drive.metadata": ScopeProfile(
+        3, "restricted", "user-drive", "metadata for every file in corpora=user, read and write"),
+    "https://www.googleapis.com/auth/drive.readonly": ScopeProfile(
+        4, "restricted", "user-drive", "content of every file in corpora=user"),
+    "https://www.googleapis.com/auth/drive": ScopeProfile(
+        5, "restricted", "user-drive", "every file in corpora=user, including delete"),
+    # --- disjoint corpora: never substitutes for anything above ---
+    "https://www.googleapis.com/auth/drive.appdata": ScopeProfile(
+        1, "non-sensitive", "app-private", "the app's own hidden configuration folder only"),
+    "https://www.googleapis.com/auth/drive.appfolder": ScopeProfile(
+        1, "non-sensitive", "app-private", "the app's own hidden configuration folder only"),
+    "https://www.googleapis.com/auth/drive.meet.readonly": ScopeProfile(
+        1, "restricted", "meet-drive", "only Drive files created or edited by Google Meet"),
+    "https://www.googleapis.com/auth/drive.photos.readonly": ScopeProfile(
+        1, "restricted", "photos-drive", "only photos stored in Drive"),
+    # --- the mailbox ---
+    "https://www.googleapis.com/auth/gmail.send": ScopeProfile(
+        1, "sensitive", "mailbox", "nothing that already exists; send only"),
+    "https://www.googleapis.com/auth/gmail.compose": ScopeProfile(
+        2, "restricted", "mailbox", "drafts and sending, but not reading the inbox"),
+    "https://www.googleapis.com/auth/gmail.metadata": ScopeProfile(
+        3, "restricted", "mailbox", "headers and labels for every message, never bodies"),
+    "https://www.googleapis.com/auth/gmail.readonly": ScopeProfile(
+        4, "restricted", "mailbox", "every message in the mailbox"),
+    "https://www.googleapis.com/auth/gmail.modify": ScopeProfile(
+        5, "restricted", "mailbox", "every message, plus compose, send and trash"),
+    "https://mail.google.com/": ScopeProfile(
+        6, "restricted", "mailbox", "every message, including permanent deletion"),
 }
 
-# method -> every scope the provider accepts for it, copied from the
-# "Authorization scopes" block on that method's own reference page.
+# method -> every scope the provider accepts for it.
+#
+# The right-hand lists below are COPIED VERBATIM from the "Authorization
+# scopes" block on each method's own reference page, in the order the page
+# prints them. Do not curate them. A scope left out of this table is a scope
+# the audit will report as UNEXERCISED, which means recommending the deletion
+# of something the observed calls genuinely require -- the exact
+# confident-and-wrong delta AuditInconclusive exists to prevent.
 #
 # Build the left column from your own log output: Google documents that
 # `method_name` exists and is a string, but not the format it emits, so these
-# keys match the bundled fixture rather than a verified literal. Copy the right
-# column verbatim and do not curate it -- a scope you leave out is a narrowing
-# this tool cannot find.
+# keys match the bundled fixture rather than a verified literal.
 METHOD_GATES: dict[str, tuple[str, ...]] = {
+    # developers.google.com/workspace/drive/api/reference/rest/v3/files/list
     "drive.files.list": (
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/drive.appdata",
         "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
         "https://www.googleapis.com/auth/drive.metadata",
         "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/drive.photos.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ),
+    # developers.google.com/workspace/drive/api/reference/rest/v3/files/get
     "drive.files.get": (
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/drive.appdata",
         "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
         "https://www.googleapis.com/auth/drive.metadata",
         "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/drive.photos.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ),
-    # Downloading content is a different requirement from reading metadata even
-    # though the method name is the same, so the variants are separate rows.
-    "drive.files.get.alt=media": (
-        "https://www.googleapis.com/auth/drive",
-        "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ),
+    # developers.google.com/workspace/drive/api/reference/rest/v3/files/export
     "drive.files.export": (
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ),
+    # developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list
     "gmail.users.messages.list": (
         "https://mail.google.com/",
-        "https://www.googleapis.com/auth/gmail.metadata",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.metadata",
     ),
+    # developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/get
     "gmail.users.messages.get": (
         "https://mail.google.com/",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.metadata",
     ),
+    # developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send
     "gmail.users.messages.send": (
         "https://mail.google.com/",
         "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.compose",
         "https://www.googleapis.com/auth/gmail.send",
     ),
 }
+
+# DERIVED, not copied. Google publishes one accepted-scope list for files.get
+# and does not split it by `alt`, but a content download is not a metadata
+# read, so the metadata-only scopes cannot satisfy it. This row is files.get's
+# published list minus drive.metadata and drive.metadata.readonly. It is a
+# judgement, flagged as one, and it is the only row here that is not verbatim.
+METHOD_GATES["drive.files.get.alt=media"] = tuple(
+    scope
+    for scope in METHOD_GATES["drive.files.get"]
+    if scope
+    not in {
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+    }
+)
+
+DERIVED_GATES = {"drive.files.get.alt=media"}
 
 # Sign-in scopes. They are granted by the identity flow rather than by a
 # feature, so they are reported separately instead of being recommended for
@@ -188,34 +244,31 @@ IDENTITY_SCOPES = {
 }
 
 
-# Scopes that reach a DISJOINT corpus rather than a smaller slice of the same
-# one. drive.appdata is listed among files.list's accepted scopes and has the
-# smallest reach of any of them, so a naive rank-by-reach recommends it -- and
-# it would break the agent instantly, because it reaches the app's own hidden
-# configuration folder and none of the user's files. Smaller is only a valid
-# recommendation when it is a SUBSET of what the current scope reaches, so
-# special-purpose scopes are excluded from being offered as substitutes. They
-# are still honoured when already granted; they are just never suggested.
-NON_SUBSTITUTABLE = {
-    "https://www.googleapis.com/auth/drive.appdata",
-    "https://www.googleapis.com/auth/drive.appfolder",
-    "https://www.googleapis.com/auth/drive.meet.readonly",
-    "https://www.googleapis.com/auth/drive.photos.readonly",
-}
-
-
-def reach(scope: str) -> int:
-    """Reach rank. Unknown scopes sort last so they are never recommended."""
-    profile = SCOPE_PROFILE.get(scope)
-    return profile[0] if profile else 99
+def profile(scope: str) -> ScopeProfile | None:
+    return SCOPE_PROFILE.get(scope)
 
 
 def describe(scope: str) -> str:
-    profile = SCOPE_PROFILE.get(scope)
-    if not profile:
-        return "unclassified"
-    _, classification, reaches = profile
-    return f"{classification}; reaches {reaches}"
+    found = profile(scope)
+    if not found:
+        return "unclassified -- add it to SCOPE_PROFILE before acting on it"
+    return f"{found.classification}; {found.corpus}; reaches {found.reaches}"
+
+
+def can_substitute(candidate: str, current: str) -> bool:
+    """May `candidate` replace `current`?
+
+    Only when both are profiled, both address the same known corpus, and the
+    candidate reaches strictly less of it. An unprofiled scope can never win,
+    which is the safe default: the tool declines to recommend what it cannot
+    describe.
+    """
+    new, old = profile(candidate), profile(current)
+    if new is None or old is None:
+        return False
+    if UNKNOWN_CORPUS in (new.corpus, old.corpus):
+        return False
+    return new.corpus == old.corpus and new.reach < old.reach
 
 
 class Audit:
@@ -246,13 +299,7 @@ def check_mappable(exercised_methods: Iterable[str]) -> None:
 
 
 def audit(granted: set[str], exercised_methods: Iterable[str]) -> Audit:
-    """Split a granted scope set into load-bearing, narrowable, and unexercised.
-
-    A granted scope is load-bearing if some observed method accepts it. It is
-    narrowable if one scope of strictly smaller REACH would have covered every
-    method it was carrying -- a different and stricter test than finding a scope
-    one rung down the capability ladder.
-    """
+    """Split a granted scope set into load-bearing, narrowable, and unexercised."""
     methods = set(exercised_methods)
     check_mappable(methods)
     identity = granted & IDENTITY_SCOPES
@@ -267,16 +314,12 @@ def audit(granted: set[str], exercised_methods: Iterable[str]) -> Audit:
             continue
         load_bearing.add(scope)
 
-        # Every scope that would have covered this scope's entire workload,
-        # minus the ones that reach a different corpus rather than less of it.
+        # Every scope that would have covered this scope's entire workload...
         alternatives = set.intersection(*(set(METHOD_GATES[m]) for m in carried))
-        alternatives -= NON_SUBSTITUTABLE
-        alternatives.discard(scope)
-        if not alternatives:
-            continue
-        best = min(alternatives, key=lambda s: (reach(s), s))
-        if reach(best) < reach(scope):
-            narrowable[scope] = best
+        # ...restricted to genuine substitutes: same corpus, smaller reach.
+        candidates = [a for a in alternatives if can_substitute(a, scope)]
+        if candidates:
+            narrowable[scope] = min(candidates, key=lambda s: (profile(s).reach, s))
 
     if methods and not load_bearing:
         # Calls succeeded that nothing in the granted set explains, so the
@@ -389,11 +432,15 @@ def report(granted: set[str], methods: set[str]) -> int:
     print(f"granted scopes ({len(granted)}):")
     for scope in sorted(granted):
         print(f"  {scope}\n      {describe(scope)}")
+
     print(f"\nexercised methods ({len(methods)}):")
     for method in sorted(methods):
         accepted = METHOD_GATES.get(method)
-        print(f"  {method}  ->  {len(accepted)} accepted scopes" if accepted
-              else f"  {method}  ->  ?? UNMAPPED")
+        if not accepted:
+            print(f"  {method}  ->  ?? UNMAPPED")
+            continue
+        note = " (derived, not copied)" if method in DERIVED_GATES else ""
+        print(f"  {method}  ->  {len(accepted)} accepted scopes{note}")
     if not methods:
         print("  (none in this window -- check the window before concluding anything)")
 
@@ -427,9 +474,15 @@ def report(granted: set[str], methods: set[str]) -> int:
             narrow = result.narrowable[broad]
             print(f"  {broad}\n      from: {describe(broad)}")
             print(f"    -> {narrow}\n      to:   {describe(narrow)}")
-            if SCOPE_PROFILE.get(narrow, (0, "", ""))[1] == "restricted":
+            if profile(narrow).classification == "restricted":
                 print("      NOTE: the recommendation is still restricted. Partial win --")
                 print("            re-check whether a non-sensitive scope covers the workload.")
+        print(
+            "\n  Every recommendation is a candidate to test, not a fact. An accepted-scope\n"
+            "  list says a call is permitted; it does not promise the response still\n"
+            "  contains the fields your code reads. Run the narrower scope against a real\n"
+            "  request before you ship it."
+        )
 
     if result.clean:
         print("\nclean: every granted scope was needed, at the reach it was granted")
@@ -490,6 +543,19 @@ DEMO_ACTIVITIES_UNMAPPED = {
     "items": DEMO_ACTIVITIES["items"] + [_activity("drive", "drive.permissions.list")]
 }
 
+# A grant whose only Drive scope addresses a disjoint corpus. The calls really
+# do accept it, so it must NOT be reported as unexercised -- that would be the
+# tool recommending the deletion of a scope the observed calls require.
+DEMO_TOKENS_DISJOINT = {
+    "items": [
+        {
+            "clientId": DEMO_CLIENT_ID,
+            "displayText": "meet-recap-agent",
+            "scopes": ["https://www.googleapis.com/auth/drive.meet.readonly"],
+        }
+    ],
+}
+
 
 def run_demo() -> int:
     granted = granted_scopes(DEMO_TOKENS, DEMO_CLIENT_ID)
@@ -504,7 +570,16 @@ def run_demo() -> int:
     print("DEMO 2 -- same grant, one method the table does not know")
     print("=" * 72)
     second = report(granted, exercised_methods(DEMO_ACTIVITIES_UNMAPPED, DEMO_CLIENT_ID))
-    print(f"\n(exit code would be {second}: refused rather than guessed)")
+    print(f"\n(exit code would be {second}: refused rather than guessed)\n")
+
+    print("=" * 72)
+    print("DEMO 3 -- a disjoint-corpus scope the calls genuinely need")
+    print("=" * 72)
+    third = report(
+        granted_scopes(DEMO_TOKENS_DISJOINT, DEMO_CLIENT_ID),
+        exercised_methods(DEMO_ACTIVITIES, DEMO_CLIENT_ID),
+    )
+    print(f"\n(exit code would be {third}: load-bearing, and never swapped across corpora)")
     return 0
 
 
