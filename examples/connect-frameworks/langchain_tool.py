@@ -89,12 +89,18 @@ def build_agent():
             # Earlier entries wrap later ones, so retry sits closest to the
             # tool and sanitise only sees what survived every attempt.
             sanitise_tool_errors,
-            # The default retry_on is (Exception,), which would happily repeat
-            # a post that already landed. Name the retryable failures.
+            # Two defaults need overriding here, not one. retry_on is
+            # (Exception,), which would happily repeat a post that already
+            # landed. And on_failure is "continue", which does not re-raise
+            # when the attempts run out -- it returns a ToolMessage carrying
+            # the exception type and str(exc), so the sanitiser above never
+            # sees the error and the model reads the raw text. "error"
+            # re-raises so the wrapper stays in charge of every string.
             ToolRetryMiddleware(
                 max_retries=2,
                 tools=["post_message_tool"],
                 retry_on=lambda exc: isinstance(exc, ChannelError) and exc.retryable,
+                on_failure="error",
             ),
             ToolCallLimitMiddleware(tool_name="post_message_tool", run_limit=5),
             HumanInTheLoopMiddleware(

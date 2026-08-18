@@ -24,13 +24,15 @@ RETRYABLE_CODES = frozenset({"ratelimited", "rate_limited"})
 # Codes whose text is safe to hand to a model: they name a state of the
 # workspace, not a state of your infrastructure. Anything outside this set is
 # reported to the model as a bare category and logged in full on your side.
+# Every entry is a code that appears verbatim in the chat.postMessage errors
+# table. Adding one that only looks plausible is how an allowlist quietly stops
+# matching: an unlisted code falls through to the generic branch, which is safe
+# but tells the model nothing it can act on.
 MODEL_SAFE_CODES = frozenset(
     {
         "channel_not_found",
         "not_in_channel",
-        "channel_archived",
         "is_archived",
-        "msg_too_long",
         "no_text",
         "restricted_action",
     }
