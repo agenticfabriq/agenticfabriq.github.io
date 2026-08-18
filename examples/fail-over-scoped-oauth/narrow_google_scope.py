@@ -1,30 +1,47 @@
-"""Narrow a live Google OAuth grant: acquire the smaller grant, THEN revoke.
+"""Narrow a live Google OAuth grant for ONE user: revoke, then re-consent.
 
-The order is the whole point. Revoking first leaves the user with a dead agent
-until they notice a prompt they were not expecting. This script:
+The order is the whole point, and it is the opposite of the intuitive one.
 
-    1. runs the authorization-code + PKCE flow for the NARROW scope set
-    2. checks the `scope` field of the token response equals that set exactly
-       -- Google warns that when an app requests multiple permissions, "users
-       may not grant your app access to all of them", so a partial grant is a
-       normal outcome, not an error you can skip
-    3. refuses to revoke anything if step 2 did not hold
-    4. only then POSTs the OLD refresh token to the revocation endpoint
+Google's web-server OAuth page prints this beside every revocation sample:
 
-There is no partial revoke: https://oauth2.googleapis.com/revoke takes a token,
-not a scope list. Revocation is all-or-nothing, which is exactly why the new
-grant has to exist and be stored before the old one is destroyed.
+    "Revocation removes all OAuth 2.0 scopes previously granted to a project,
+     invalidating any issued access or refresh tokens for all clients
+     registered under that project."
+
+The grant is held per project per user, not per token: the same page says the
+combined authorization "includes all scopes that the user granted to the API
+project even if the grants were requested from different clients". Two things
+follow, and both kill the acquire-then-revoke order:
+
+  * Revoking the broad refresh token AFTER acquiring the narrow one destroys
+    the narrow one too. Same user, same project, one grant record.
+  * A subset re-consent does not narrow the grant record on its own. Only an
+    explicit revoke clears it, or a later request can be auto-approved back up
+    to the old scope set without showing the user anything.
+
+So: revoke first, consent immediately afterwards, and keep the gap between them
+to the few seconds of one user-initiated interaction. That is why this script
+is meant to run from inside a first-run interstitial while the user is present,
+never from a background job.
+
+Blast radius warning: the revoke below clears this user's grant for EVERY OAuth
+client registered under the same Cloud project. Check what else lives in the
+project before running it -- if the agent shares a project with your main
+product, this signs the user out of the product too.
 
     python3 narrow_google_scope.py --dry-run
         Print the plan and the authorization URL. No browser, no network,
-        no revocation. Start here.
+        nothing revoked. Start here.
 
     python3 narrow_google_scope.py --old-refresh-token "$OLD"
-        Do it for real, for one user.
+        Do it for real, for one user, with that user watching.
 
 Environment:
     GOOGLE_CLIENT_ID      OAuth client id (Google Cloud console, "Desktop app")
     GOOGLE_CLIENT_SECRET  the matching client secret
+
+Exit codes: 0 narrowed, 1 revoked but not re-consented (user must be re-prompted),
+2 nothing happened.
 
 Requires: pip install requests
 """
@@ -50,19 +67,37 @@ REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 # What the agent is being narrowed FROM and TO. drive.readonly is Google's
 # "View and download all your Drive files" and is classified restricted;
 # drive.file is "Create new Drive files, or modify existing files, that you
-# open with an app or that the user shares with an app" and is not.
+# open with an app or that the user shares with an app while using the Google
+# Picker API or the app's file picker", and is non-sensitive.
+#
+# Note this is a change of access MODEL, not a subset trim: after cutover the
+# agent reaches nothing until the user re-picks files through the picker. Plan
+# that re-pick into the same interstitial.
 OLD_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 NEW_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+# Google returns sign-in scopes alongside whatever you asked for. Both the bare
+# OIDC names and the userinfo.* URLs appear in the wild, so tolerate all of them
+# when checking that nothing broader came back.
+IDENTITY_SCOPES = {
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+}
 
 REDIRECT_PORT = 8766
 REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/oauth2callback"
 
 
-class NarrowingAborted(Exception):
-    """Raised whenever the new grant is not provably in hand.
+class ConsentFailed(Exception):
+    """The narrow grant was not obtained after the old one was already revoked.
 
-    Every raise site below is a point at which revoking the old token would
-    leave the user with no working integration and no new one either.
+    This is a real state, not an edge case: the user closed the tab. They now
+    have no grant at all, so the caller must mark the connection as needing
+    consent and put them back into the interstitial next session. It must never
+    become a background retry loop.
     """
 
 
@@ -136,11 +171,39 @@ def wait_for_callback(timeout_seconds: int = 300) -> dict[str, list[str]]:
     try:
         while not _CallbackHandler.query:
             if time.monotonic() >= deadline:
-                raise NarrowingAborted(f"no OAuth callback within {timeout_seconds}s")
+                raise ConsentFailed(f"no OAuth callback within {timeout_seconds}s")
             server.handle_request()
     finally:
         server.server_close()
     return _CallbackHandler.query
+
+
+def revoke(token: str) -> None:
+    """POST the OLD token to the revocation endpoint. Runs FIRST, by design.
+
+    Clears the whole project-level grant for this user, which is exactly what
+    makes the narrowing real -- and exactly why every other client under the
+    project loses this user's grant at the same moment.
+    """
+    import requests
+
+    response = requests.post(
+        REVOKE_ENDPOINT,
+        data={"token": token},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+    if response.status_code == 200:
+        print("[revoke] old project-level grant cleared")
+        return
+    # A token that is already invalid is a success for our purposes: the goal
+    # is that it stops working, and it has.
+    if response.status_code == 400 and "invalid_token" in response.text:
+        print("[revoke] old token was already invalid; nothing to do")
+        return
+    # Do NOT continue to consent on an unknown revoke failure: the old grant may
+    # still be live, and consenting now would leave the user holding both.
+    raise SystemExit(f"revoke failed {response.status_code}: {response.text}")
 
 
 def exchange_code(client_id: str, client_secret: str, code: str, verifier: str) -> dict:
@@ -159,7 +222,7 @@ def exchange_code(client_id: str, client_secret: str, code: str, verifier: str) 
         timeout=30,
     )
     if response.status_code != 200:
-        raise NarrowingAborted(f"token exchange failed {response.status_code}: {response.text}")
+        raise ConsentFailed(f"token exchange failed {response.status_code}: {response.text}")
     return response.json()
 
 
@@ -170,69 +233,47 @@ def assert_exactly_narrow(token: dict) -> set[str]:
 
     missing = sorted(wanted - granted)
     if missing:
-        # The user unticked something. The old token is still the only working
-        # credential, so leave it alone and let them try again.
-        raise NarrowingAborted(f"user withheld: {', '.join(missing)}")
+        raise ConsentFailed(f"user withheld: {', '.join(missing)}")
 
-    extra = sorted(granted - wanted - {"openid", "email", "profile"})
+    extra = sorted(granted - wanted - IDENTITY_SCOPES)
     if extra:
-        # Nothing was narrowed. Revoking the old token here would destroy a
-        # working credential and replace it with an equally broad one.
-        raise NarrowingAborted(
-            "response is not narrower than the old grant; still carries: " + ", ".join(extra)
-        )
+        raise ConsentFailed("grant is not narrower; still carries: " + ", ".join(extra))
 
     if "refresh_token" not in token:
-        # Without a refresh token there is no durable new grant to fall back
-        # on, so revoking the old one strands this user at the next run.
-        raise NarrowingAborted("no refresh_token in the response; nothing durable to keep")
+        raise ConsentFailed("no refresh_token in the response; nothing durable to store")
 
     return granted
 
 
 def store_new_refresh_token(user: str, refresh_token: str) -> None:
-    """Replace with a write to your encrypted credential store.
+    """Replace with a write to your encrypted credential store."""
+    print(f"[store] {user}: new refresh token stored ({len(refresh_token)} chars)")
 
-    It must be durable and readable by the agent BEFORE the revoke below. If
-    this write can fail silently, the revoke is a data-loss bug.
+
+def mark_needs_consent(user: str, reason: str) -> None:
+    """The user has no grant at all right now. Make that an explicit state.
+
+    Put them back into the same interstitial on their next session. Do not
+    retry in the background -- there is no consent screen to click out there.
     """
-    print(f"[store] {user}: new refresh token acquired ({len(refresh_token)} chars)")
-
-
-def revoke(token: str) -> None:
-    """POST the OLD token to the revocation endpoint. 200 means revoked."""
-    import requests
-
-    response = requests.post(
-        REVOKE_ENDPOINT,
-        data={"token": token},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    if response.status_code == 200:
-        print("[revoke] old grant revoked")
-        return
-    # A token that is already invalid is a success for our purposes: the goal
-    # is that it stops working, and it has.
-    if response.status_code == 400 and "invalid_token" in response.text:
-        print("[revoke] old token was already invalid; nothing to do")
-        return
-    raise SystemExit(f"revoke failed {response.status_code}: {response.text}")
+    print(f"[state] {user}: connection marked NEEDS_CONSENT ({reason})", file=sys.stderr)
 
 
 def plan() -> None:
     print("narrowing plan")
     print(f"  from: {' '.join(OLD_SCOPES)}")
     print(f"  to:   {' '.join(NEW_SCOPES)}")
-    print("  order: consent -> verify scope field -> store -> revoke old")
-    print("  a failure at any step before 'store' leaves the old grant untouched")
+    print("  order: revoke -> consent -> verify scope field -> store")
+    print("  run this from a user-facing interstitial, with the user present")
+    print("  WARNING: the revoke clears this user's grant for every OAuth")
+    print("           client registered under the same Cloud project")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true", help="print the plan and URL only")
     parser.add_argument("--user", default="user@example.com", help="who this grant belongs to")
-    parser.add_argument("--old-refresh-token", help="the broad refresh token to revoke at the end")
+    parser.add_argument("--old-refresh-token", help="the broad refresh token, revoked first")
     args = parser.parse_args()
 
     verifier, challenge = make_pkce_pair()
@@ -244,7 +285,7 @@ def main() -> int:
         # client id falls back to a placeholder rather than raising.
         placeholder = os.environ.get("GOOGLE_CLIENT_ID", "<GOOGLE_CLIENT_ID>")
         print("\nauthorization URL:\n" + build_authorization_url(placeholder, challenge, state))
-        print("\ndry run: no browser opened, no token exchanged, nothing revoked")
+        print("\ndry run: nothing revoked, no browser opened, no token exchanged")
         return 0
 
     if not args.old_refresh_token:
@@ -255,7 +296,12 @@ def main() -> int:
     client_secret = os.environ["GOOGLE_CLIENT_SECRET"]
     url = build_authorization_url(client_id, challenge, state)
 
-    print("\nOpen this URL and grant the narrower consent:\n", url, "\n")
+    # STEP ONE. Everything after this point runs with the user holding no grant,
+    # so it has to be fast and it has to be in front of them.
+    revoke(args.old_refresh_token)
+    mark_needs_consent(args.user, "revoked, awaiting narrow consent")
+
+    print("\nOpen this URL now and grant the narrower consent:\n", url, "\n")
     webbrowser.open(url)
 
     try:
@@ -263,28 +309,25 @@ def main() -> int:
 
         # state is a CSRF defence, so compare it in constant time.
         if not secrets.compare_digest(query.get("state", [""])[0], state):
-            raise NarrowingAborted("state mismatch; discarding the response")
+            raise ConsentFailed("state mismatch; discarding the response")
         if "error" in query:
-            raise NarrowingAborted(f"consent denied: {query['error'][0]}")
+            raise ConsentFailed(f"consent denied: {query['error'][0]}")
 
         token = exchange_code(client_id, client_secret, query["code"][0], verifier)
         granted = assert_exactly_narrow(token)
         store_new_refresh_token(args.user, token["refresh_token"])
-    except NarrowingAborted as error:
-        print(f"\nABORTED: {error}", file=sys.stderr)
+    except ConsentFailed as error:
+        print(f"\nCONSENT DID NOT COMPLETE: {error}", file=sys.stderr)
         print(
-            "The old grant was NOT revoked. The agent keeps working at the old\n"
-            "width, which is the failure mode you want: too much access beats\n"
-            "no access plus a support ticket. Re-run when the user is ready.",
+            "The old grant is already revoked, so this user currently has NO\n"
+            "access. The connection stays marked NEEDS_CONSENT. Re-prompt from\n"
+            "the interstitial on their next session; do not retry in the\n"
+            "background, and do not restore the old scope set to paper over it.",
             file=sys.stderr,
         )
         return 1
 
     print("[verify] granted exactly:", " ".join(sorted(granted)))
-
-    # Only now. The new grant exists, was verified, and has been stored.
-    revoke(args.old_refresh_token)
-
     print(
         "\n"
         + json.dumps(
@@ -292,11 +335,11 @@ def main() -> int:
                 "user": args.user,
                 "removed": OLD_SCOPES,
                 "kept": NEW_SCOPES,
+                "order": "revoke -> consent -> verify -> store",
                 "verified_from": "token response `scope` field",
                 "note": (
-                    "Google documents the upward merge and documents revocation, but "
-                    "does not state whether a subset re-consent clears the grant record. "
-                    "Confirm at https://myaccount.google.com/permissions."
+                    "Revocation cleared the project-level grant for every client under "
+                    "this Cloud project. Confirm at https://myaccount.google.com/permissions."
                 ),
             },
             indent=2,

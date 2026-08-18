@@ -18,13 +18,17 @@ The audit in three parts:
                client_id, client_type, method_name, num_response_bytes and
                product_bucket. Only the authorize/deny/request/revoke events
                carry `scope`, and those describe grants rather than calls. So
-               the join from a called method to the scope that gates it is
+               the join from a called method to the scopes that gate it is
                ours to write -- that is the METHOD_GATES table below.
 
   3. VERDICT   Two findings, because they have different fixes:
-                 UNEXERCISED  granted, and no observed call needed it. Delete.
-                 NARROWABLE   granted, load-bearing only because a narrower
-                              scope was never granted. Swap it down.
+                 UNEXERCISED  granted, and no observed call accepts it. Delete.
+                 NARROWABLE   granted and load-bearing, but a scope with
+                              strictly smaller REACH would have covered every
+                              call it carried. Swap it down.
+
+               Candidates are ranked by reach, not by the provider's capability
+               tier. See the comment on SCOPE_PROFILE for why that matters.
 
 Three ways to run it:
 
@@ -78,47 +82,98 @@ class AuditInconclusive(Exception):
         super().__init__("; ".join(self.reasons))
 
 
-# Method -> the NARROWEST scope that satisfies it.
+# scope -> (reach rank, provider's classification, what it actually reaches).
 #
-# Build the left column from your own log output. The exact string format
-# Google emits in `method_name` is not documented on the audit-event reference,
-# so the keys below are the shape used by the bundled fixture and not a
-# verified literal. Mapping each method to the narrowest satisfying scope
-# (rather than to any scope that would work) is what makes the delta
-# meaningful: map to the broadest and the audit always passes.
-METHOD_GATES: dict[str, str] = {
-    "drive.files.list": "https://www.googleapis.com/auth/drive.metadata.readonly",
-    "drive.files.get": "https://www.googleapis.com/auth/drive.metadata.readonly",
-    # Content download is a different requirement from metadata even though the
-    # method name is the same. Keep the variants as separate rows, or the audit
-    # will score drive.readonly as exercised by a metadata-only summariser.
-    "drive.files.get.alt=media": "https://www.googleapis.com/auth/drive.readonly",
-    "drive.files.export": "https://www.googleapis.com/auth/drive.readonly",
-    "gmail.users.messages.list": "https://www.googleapis.com/auth/gmail.readonly",
-    "gmail.users.messages.get": "https://www.googleapis.com/auth/gmail.readonly",
-    "gmail.users.messages.send": "https://www.googleapis.com/auth/gmail.send",
+# RANK IS BY REACH, NOT BY CAPABILITY TIER. That distinction is the whole point.
+# drive.metadata.readonly sits one rung below drive.readonly on Google's
+# capability ladder, but it still enumerates every file in corpora=user, so
+# swapping one for the other barely moves the blast radius. drive.file is
+# non-sensitive AND bounded to files the user hands over through the picker, so
+# it is the real narrowing. A tool that ranked by tier would recommend the first
+# swap and call the audit done, which is how a team ships a "narrowing" that
+# changes nothing measurable.
+#
+# The ranks are a judgement about reach and you should edit them for your own
+# data model. The classifications are the provider's own, from the Drive and
+# Gmail scope references.
+SCOPE_PROFILE: dict[str, tuple[int, str, str]] = {
+    "https://www.googleapis.com/auth/drive.appdata": (
+        0, "non-sensitive", "the app's own configuration data only"),
+    "https://www.googleapis.com/auth/drive.file": (
+        1, "non-sensitive", "only files the user hands over via the picker"),
+    "https://www.googleapis.com/auth/drive.metadata.readonly": (
+        2, "restricted", "metadata for every file in corpora=user"),
+    "https://www.googleapis.com/auth/drive.metadata": (
+        3, "restricted", "metadata for every file in corpora=user, read and write"),
+    "https://www.googleapis.com/auth/drive.readonly": (
+        4, "restricted", "content of every file in corpora=user"),
+    "https://www.googleapis.com/auth/drive": (
+        5, "restricted", "every file in corpora=user, including delete"),
+    "https://www.googleapis.com/auth/gmail.send": (
+        1, "sensitive", "nothing that already exists; send only"),
+    "https://www.googleapis.com/auth/gmail.metadata": (
+        2, "restricted", "headers and labels for every message, never bodies"),
+    "https://www.googleapis.com/auth/gmail.readonly": (
+        3, "restricted", "every message in the mailbox"),
+    "https://www.googleapis.com/auth/gmail.modify": (
+        4, "restricted", "every message, plus compose, send and trash"),
+    "https://mail.google.com/": (
+        5, "restricted", "every message, including permanent deletion"),
 }
 
-# Broad scope -> the narrower scopes it subsumes. Used only to work out which
-# granted scope was actually carrying a call; it never excuses the broad grant.
-SCOPE_IMPLIES: dict[str, set[str]] = {
-    "https://www.googleapis.com/auth/drive": {
-        "https://www.googleapis.com/auth/drive.readonly",
-        "https://www.googleapis.com/auth/drive.metadata.readonly",
+# method -> every scope the provider accepts for it, copied from the
+# "Authorization scopes" block on that method's own reference page.
+#
+# Build the left column from your own log output: Google documents that
+# `method_name` exists and is a string, but not the format it emits, so these
+# keys match the bundled fixture rather than a verified literal. Copy the right
+# column verbatim and do not curate it -- a scope you leave out is a narrowing
+# this tool cannot find.
+METHOD_GATES: dict[str, tuple[str, ...]] = {
+    "drive.files.list": (
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
         "https://www.googleapis.com/auth/drive.file",
-    },
-    "https://www.googleapis.com/auth/drive.readonly": {
+        "https://www.googleapis.com/auth/drive.metadata",
         "https://www.googleapis.com/auth/drive.metadata.readonly",
-    },
-    "https://mail.google.com/": {
+        "https://www.googleapis.com/auth/drive.readonly",
+    ),
+    "drive.files.get": (
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ),
+    # Downloading content is a different requirement from reading metadata even
+    # though the method name is the same, so the variants are separate rows.
+    "drive.files.get.alt=media": (
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ),
+    "drive.files.export": (
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ),
+    "gmail.users.messages.list": (
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.metadata",
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.send",
-    },
-    "https://www.googleapis.com/auth/gmail.modify": {
+    ),
+    "gmail.users.messages.get": (
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.readonly",
+    ),
+    "gmail.users.messages.send": (
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.send",
-    },
+    ),
 }
 
 # Sign-in scopes. They are granted by the identity flow rather than by a
@@ -133,19 +188,47 @@ IDENTITY_SCOPES = {
 }
 
 
+# Scopes that reach a DISJOINT corpus rather than a smaller slice of the same
+# one. drive.appdata is listed among files.list's accepted scopes and has the
+# smallest reach of any of them, so a naive rank-by-reach recommends it -- and
+# it would break the agent instantly, because it reaches the app's own hidden
+# configuration folder and none of the user's files. Smaller is only a valid
+# recommendation when it is a SUBSET of what the current scope reaches, so
+# special-purpose scopes are excluded from being offered as substitutes. They
+# are still honoured when already granted; they are just never suggested.
+NON_SUBSTITUTABLE = {
+    "https://www.googleapis.com/auth/drive.appdata",
+    "https://www.googleapis.com/auth/drive.appfolder",
+    "https://www.googleapis.com/auth/drive.meet.readonly",
+    "https://www.googleapis.com/auth/drive.photos.readonly",
+}
+
+
+def reach(scope: str) -> int:
+    """Reach rank. Unknown scopes sort last so they are never recommended."""
+    profile = SCOPE_PROFILE.get(scope)
+    return profile[0] if profile else 99
+
+
+def describe(scope: str) -> str:
+    profile = SCOPE_PROFILE.get(scope)
+    if not profile:
+        return "unclassified"
+    _, classification, reaches = profile
+    return f"{classification}; reaches {reaches}"
+
+
 class Audit:
     """The verdict for one client id over one evidence window."""
 
     def __init__(
         self,
         granted: set[str],
-        required: set[str],
         unexercised: set[str],
-        narrowable: dict[str, set[str]],
+        narrowable: dict[str, str],
         identity: set[str],
     ) -> None:
         self.granted = granted
-        self.required = required
         self.unexercised = unexercised
         self.narrowable = narrowable
         self.identity = identity
@@ -155,42 +238,54 @@ class Audit:
         return not self.unexercised and not self.narrowable
 
 
-def required_scopes(exercised_methods: Iterable[str]) -> set[str]:
-    """Narrowest scope set that would have satisfied every observed call."""
-    methods = set(exercised_methods)
-    unmapped = sorted(method for method in methods if method not in METHOD_GATES)
+def check_mappable(exercised_methods: Iterable[str]) -> None:
+    """Refuse the audit unless every observed method is in METHOD_GATES."""
+    unmapped = sorted(m for m in set(exercised_methods) if m not in METHOD_GATES)
     if unmapped:
         raise AuditInconclusive(f"no METHOD_GATES entry for {method}" for method in unmapped)
-    return {METHOD_GATES[method] for method in methods}
 
 
 def audit(granted: set[str], exercised_methods: Iterable[str]) -> Audit:
-    """Split a granted scope set into load-bearing, narrowable, and unexercised."""
-    required = required_scopes(exercised_methods)
+    """Split a granted scope set into load-bearing, narrowable, and unexercised.
+
+    A granted scope is load-bearing if some observed method accepts it. It is
+    narrowable if one scope of strictly smaller REACH would have covered every
+    method it was carrying -- a different and stricter test than finding a scope
+    one rung down the capability ladder.
+    """
+    methods = set(exercised_methods)
+    check_mappable(methods)
     identity = granted & IDENTITY_SCOPES
     audited = granted - IDENTITY_SCOPES
 
     load_bearing: set[str] = set()
-    narrowable: dict[str, set[str]] = {}
+    narrowable: dict[str, str] = {}
 
-    for scope in sorted(required):
-        if scope in audited:
-            # The narrow scope was granted and used. Nothing to say about it.
-            load_bearing.add(scope)
+    for scope in sorted(audited):
+        carried = {m for m in methods if scope in METHOD_GATES[m]}
+        if not carried:
             continue
-        covering = sorted(g for g in audited if scope in SCOPE_IMPLIES.get(g, set()))
-        if not covering:
-            # A call succeeded that nothing in the granted set explains, so the
-            # granted set is stale or the mapping is wrong. Either way the
-            # delta below would be guesswork.
-            raise AuditInconclusive([f"no granted scope covers {scope}"])
-        for broad in covering:
-            load_bearing.add(broad)
-            narrowable.setdefault(broad, set()).add(scope)
+        load_bearing.add(scope)
+
+        # Every scope that would have covered this scope's entire workload,
+        # minus the ones that reach a different corpus rather than less of it.
+        alternatives = set.intersection(*(set(METHOD_GATES[m]) for m in carried))
+        alternatives -= NON_SUBSTITUTABLE
+        alternatives.discard(scope)
+        if not alternatives:
+            continue
+        best = min(alternatives, key=lambda s: (reach(s), s))
+        if reach(best) < reach(scope):
+            narrowable[scope] = best
+
+    if methods and not load_bearing:
+        # Calls succeeded that nothing in the granted set explains, so the
+        # granted set is stale or the mapping is wrong. Either way the verdict
+        # below would be guesswork.
+        raise AuditInconclusive(["no granted scope accepts any observed method"])
 
     return Audit(
         granted=granted,
-        required=required,
         unexercised=audited - load_bearing,
         narrowable=narrowable,
         identity=identity,
@@ -293,10 +388,12 @@ def exercised_methods(activities_body: dict[str, Any], client_id: str | None) ->
 def report(granted: set[str], methods: set[str]) -> int:
     print(f"granted scopes ({len(granted)}):")
     for scope in sorted(granted):
-        print(f"  {scope}")
+        print(f"  {scope}\n      {describe(scope)}")
     print(f"\nexercised methods ({len(methods)}):")
     for method in sorted(methods):
-        print(f"  {method}  ->  {METHOD_GATES.get(method, '?? UNMAPPED')}")
+        accepted = METHOD_GATES.get(method)
+        print(f"  {method}  ->  {len(accepted)} accepted scopes" if accepted
+              else f"  {method}  ->  ?? UNMAPPED")
     if not methods:
         print("  (none in this window -- check the window before concluding anything)")
 
@@ -309,7 +406,7 @@ def report(granted: set[str], methods: set[str]) -> int:
             print(f"  {reason}", file=sys.stderr)
         print(
             "\nFill in METHOD_GATES from the provider's per-method scope reference\n"
-            "before trusting any delta. A partial mapping silently under-reports.",
+            "before trusting any verdict. A partial mapping silently under-reports.",
             file=sys.stderr,
         )
         return 2
@@ -320,18 +417,22 @@ def report(granted: set[str], methods: set[str]) -> int:
             print(f"  {scope}")
 
     if result.unexercised:
-        print(f"\nUNEXERCISED ({len(result.unexercised)}) -- no observed call needed these:")
+        print(f"\nUNEXERCISED ({len(result.unexercised)}) -- no observed call accepts these:")
         for scope in sorted(result.unexercised):
-            print(f"  {scope}")
+            print(f"  {scope}\n      {describe(scope)}")
 
     if result.narrowable:
-        print(f"\nNARROWABLE ({len(result.narrowable)}) -- broader than the calls required:")
+        print(f"\nNARROWABLE ({len(result.narrowable)}) -- smaller reach would have sufficed:")
         for broad in sorted(result.narrowable):
-            for narrow in sorted(result.narrowable[broad]):
-                print(f"  {broad}\n    -> {narrow}")
+            narrow = result.narrowable[broad]
+            print(f"  {broad}\n      from: {describe(broad)}")
+            print(f"    -> {narrow}\n      to:   {describe(narrow)}")
+            if SCOPE_PROFILE.get(narrow, (0, "", ""))[1] == "restricted":
+                print("      NOTE: the recommendation is still restricted. Partial win --")
+                print("            re-check whether a non-sensitive scope covers the workload.")
 
     if result.clean:
-        print("\nclean: every granted scope was needed, at the width it was granted")
+        print("\nclean: every granted scope was needed, at the reach it was granted")
         return 0
 
     print(
