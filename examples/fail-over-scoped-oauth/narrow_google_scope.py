@@ -91,6 +91,14 @@ REDIRECT_PORT = 8766
 REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/oauth2callback"
 
 
+class RevokeFailed(Exception):
+    """The old grant could not be cleared, so the narrowing never started.
+
+    Distinct from ConsentFailed: here the user still has their old access and
+    nothing has changed, which is exit 2 rather than exit 1.
+    """
+
+
 class ConsentFailed(Exception):
     """The narrow grant was not obtained after the old one was already revoked.
 
@@ -178,7 +186,7 @@ def wait_for_callback(timeout_seconds: int = 300) -> dict[str, list[str]]:
     return _CallbackHandler.query
 
 
-def revoke(token: str) -> None:
+def revoke(token: str, label: str = "old project-level grant") -> None:
     """POST the OLD token to the revocation endpoint. Runs FIRST, by design.
 
     Clears the whole project-level grant for this user, which is exactly what
@@ -194,16 +202,18 @@ def revoke(token: str) -> None:
         timeout=30,
     )
     if response.status_code == 200:
-        print("[revoke] old project-level grant cleared")
+        print(f"[revoke] {label} cleared")
         return
     # A token that is already invalid is a success for our purposes: the goal
     # is that it stops working, and it has.
     if response.status_code == 400 and "invalid_token" in response.text:
-        print("[revoke] old token was already invalid; nothing to do")
+        print(f"[revoke] {label} was already invalid; nothing to do")
         return
     # Do NOT continue to consent on an unknown revoke failure: the old grant may
     # still be live, and consenting now would leave the user holding both.
-    raise SystemExit(f"revoke failed {response.status_code}: {response.text}")
+    # This is exit 2 ("nothing happened"), never exit 1 ("revoked, not
+    # re-consented") -- a caller has to be able to tell those two apart.
+    raise RevokeFailed(f"revoke failed {response.status_code}: {response.text}")
 
 
 def exchange_code(client_id: str, client_secret: str, code: str, verifier: str) -> dict:
@@ -226,6 +236,30 @@ def exchange_code(client_id: str, client_secret: str, code: str, verifier: str) 
     return response.json()
 
 
+def _discard(token: dict, why: str) -> None:
+    """Revoke a token we are about to throw away, before throwing it away.
+
+    Google has already issued this grant. Dropping the response on the floor
+    leaves a live grant on the user's account that this app can no longer see
+    or clear -- standing authority nobody owns, which is the whole subject of
+    this guide. Revoke it first, then raise.
+    """
+    doomed = token.get("refresh_token") or token.get("access_token")
+    if not doomed:
+        return
+    try:
+        revoke(doomed, label="discarded narrow grant")
+        print(f"[cleanup] discarded grant revoked ({why})", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - cleanup must never mask `why`
+        # Report loudly and keep going: the caller still needs the original
+        # reason, and a human now has an orphan grant to clear by hand.
+        print(
+            f"[cleanup] COULD NOT revoke the discarded grant ({error}). "
+            "Clear it manually at https://myaccount.google.com/permissions",
+            file=sys.stderr,
+        )
+
+
 def assert_exactly_narrow(token: dict) -> set[str]:
     """The grant is only narrowed if the response says so. Verify, do not assume."""
     granted = set(token.get("scope", "").split())
@@ -233,13 +267,16 @@ def assert_exactly_narrow(token: dict) -> set[str]:
 
     missing = sorted(wanted - granted)
     if missing:
+        _discard(token, "user withheld a requested scope")
         raise ConsentFailed(f"user withheld: {', '.join(missing)}")
 
     extra = sorted(granted - wanted - IDENTITY_SCOPES)
     if extra:
+        _discard(token, "grant came back broader than requested")
         raise ConsentFailed("grant is not narrower; still carries: " + ", ".join(extra))
 
     if "refresh_token" not in token:
+        _discard(token, "no refresh token to store")
         raise ConsentFailed("no refresh_token in the response; nothing durable to store")
 
     return granted
@@ -296,10 +333,24 @@ def main() -> int:
     client_secret = os.environ["GOOGLE_CLIENT_SECRET"]
     url = build_authorization_url(client_id, challenge, state)
 
+    # Mark BEFORE revoking, not after: the write is idempotent, and a crash
+    # between the two calls would otherwise leave a user with no grant and
+    # nothing recording that fact.
+    mark_needs_consent(args.user, "about to revoke, awaiting narrow consent")
+
     # STEP ONE. Everything after this point runs with the user holding no grant,
     # so it has to be fast and it has to be in front of them.
-    revoke(args.old_refresh_token)
-    mark_needs_consent(args.user, "revoked, awaiting narrow consent")
+    try:
+        revoke(args.old_refresh_token)
+    except RevokeFailed as error:
+        print(f"\nREVOKE FAILED: {error}", file=sys.stderr)
+        print(
+            "Nothing was changed. The old grant may still be live, so the user\n"
+            "still has working access at the old width. Do not send them to the\n"
+            "consent screen: they would end up holding both grants.",
+            file=sys.stderr,
+        )
+        return 2
 
     print("\nOpen this URL now and grant the narrower consent:\n", url, "\n")
     webbrowser.open(url)
@@ -322,7 +373,12 @@ def main() -> int:
             "The old grant is already revoked, so this user currently has NO\n"
             "access. The connection stays marked NEEDS_CONSENT. Re-prompt from\n"
             "the interstitial on their next session; do not retry in the\n"
-            "background, and do not restore the old scope set to paper over it.",
+            "background, and do not restore the old scope set to paper over it.\n"
+            "\n"
+            "The revoke cleared this user's grant for EVERY client under the same\n"
+            "Cloud project, so any sibling integration they were using also needs\n"
+            "its own re-consent. Notify those owners; this state is recoverable,\n"
+            "but not by this script alone.",
             file=sys.stderr,
         )
         return 1
