@@ -39,4 +39,39 @@ describe('guideFrontmatterSchema', () => {
   it('defaults cornerstone to false', () => {
     expect(guideFrontmatterSchema.parse(valid).cornerstone).toBe(false);
   });
+
+  it('accepts frontmatter with howTo and faq present and valid', () => {
+    const withExtras = {
+      ...valid,
+      howTo: [
+        { name: 'Create OAuth credentials', text: 'Register the agent in Google Cloud console.' },
+        { name: 'Scope the consent screen', text: 'Request only the Gmail scopes the agent needs.' },
+      ],
+      faq: [
+        { question: 'Does Gmail access require a Workspace admin?', answer: 'Only for domain-wide delegation.' },
+        { question: 'Can the agent send email without read access?', answer: 'Yes, gmail.send does not grant read access.' },
+      ],
+    };
+    expect(() => guideFrontmatterSchema.parse(withExtras)).not.toThrow();
+  });
+
+  it('accepts frontmatter with howTo and faq absent', () => {
+    expect(() => guideFrontmatterSchema.parse(valid)).not.toThrow();
+  });
+
+  it('rejects a howTo with fewer than two entries', () => {
+    const withShortHowTo = {
+      ...valid,
+      howTo: [{ name: 'Create OAuth credentials', text: 'Register the agent in Google Cloud console.' }],
+    };
+    expect(() => guideFrontmatterSchema.parse(withShortHowTo)).toThrow();
+  });
+
+  it('rejects a faq with fewer than two entries', () => {
+    const withShortFaq = {
+      ...valid,
+      faq: [{ question: 'Does Gmail access require a Workspace admin?', answer: 'Only for domain-wide delegation.' }],
+    };
+    expect(() => guideFrontmatterSchema.parse(withShortFaq)).toThrow();
+  });
 });

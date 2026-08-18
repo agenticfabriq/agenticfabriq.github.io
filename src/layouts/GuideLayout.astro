@@ -4,7 +4,7 @@ import { getEntry, render } from 'astro:content';
 import BaseLayout from './BaseLayout.astro';
 import Breadcrumbs from '../components/Breadcrumbs.astro';
 import { getPillar } from '../lib/pillars';
-import { canonical, articleJsonLd, breadcrumbJsonLd } from '../lib/seo';
+import { canonical, articleJsonLd, breadcrumbJsonLd, howToJsonLd, faqJsonLd } from '../lib/seo';
 
 interface Props {
   entry: CollectionEntry<'guides'>;
@@ -31,12 +31,20 @@ const trail = data.cornerstone
 const related = (
   await Promise.all(data.relatedGuides.map((id) => getEntry('guides', id)))
 ).filter(Boolean) as CollectionEntry<'guides'>[];
+
+const jsonLd = [articleJsonLd({ ...data, url }), breadcrumbJsonLd(trail)];
+if (data.howTo) {
+  jsonLd.push(howToJsonLd({ title: data.title, description: data.description, url, steps: data.howTo }));
+}
+if (data.faq) {
+  jsonLd.push(faqJsonLd(data.faq));
+}
 ---
 <BaseLayout
   title={data.title}
   description={data.description}
   path={path}
-  jsonLd={[articleJsonLd({ ...data, url }), breadcrumbJsonLd(trail)]}
+  jsonLd={jsonLd}
 >
   <Breadcrumbs trail={trail} />
   <h1>{data.title}</h1>
