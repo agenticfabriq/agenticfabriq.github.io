@@ -39,6 +39,9 @@ REVOKED_CODES = {
 CONSENT_CODES = {
     65001,  # DelegationDoesNotExist: user or admin has not consented
 }
+ASSERTION_CODES = {
+    500133,  # the inbound assertion is outside its valid time range
+}
 
 
 class DelegationEnded(Exception):
@@ -47,6 +50,16 @@ class DelegationEnded(Exception):
 
 class ConsentRequired(Exception):
     """The agent needs a consent it does not have. Send the user through consent."""
+
+
+class AssertionExpired(Exception):
+    """The inbound token was stale by the time it was exchanged.
+
+    Recoverable, and caller-side. The delegation is intact: the caller simply
+    presented a token past its `exp`. Ask for a fresh one with a 401. Deleting a
+    stored delegation here would force a full re-consent for a grant nobody
+    revoked, which is why this is a separate exception from DelegationEnded.
+    """
 
 
 class ClaimsChallenge(Exception):
@@ -99,10 +112,15 @@ def _post_form(url: str, form: dict[str, str]) -> dict:
 def _raise_for_oauth_error(body: dict, status: int) -> None:
     """Turn a token-endpoint error body into an exception that says what to do.
 
-    Order matters. Branch on the numeric `error_codes` first, because the string
-    `error` is coarse: `invalid_grant` covers a revoked grant, an expired
-    assertion, and a Conditional Access step-up, and those need three different
-    responses from you.
+    Order matters, and the ordering is the point. Branch on the numeric
+    `error_codes` first and treat the `error` string as a hint only. Microsoft's
+    error reference documents each AADSTS code and its text but does not say
+    which OAuth `error` string each code arrives alongside, so any logic keyed on
+    the string is built on an assumption the vendor never published.
+
+    One `error` value is documented and is used below: Entra's own OBO page shows
+    a Conditional Access step-up as `"error": "interaction_required"` carrying a
+    `claims` blob, not as `invalid_grant`.
     """
     error = body.get("error", "")
     codes = set(body.get("error_codes") or ())
@@ -113,12 +131,17 @@ def _raise_for_oauth_error(body: dict, status: int) -> None:
         raise DelegationEnded(description)
     if codes & CONSENT_CODES:
         raise ConsentRequired(description)
+    if codes & ASSERTION_CODES:
+        # Stale inbound token, not a dead grant. Must precede the invalid_grant
+        # fallback below, which would otherwise classify it as a revocation.
+        raise AssertionExpired(description)
     if claims is not None or error == "interaction_required":
         raise ClaimsChallenge(description, claims)
     if error == "invalid_grant":
-        # invalid_grant with no code we recognise is still terminal for this
-        # assertion: the token you were handed cannot be redeemed. Treat it as
-        # the end of the delegation rather than looping on it.
+        # An invalid_grant carrying no code recognised above is terminal: the
+        # token you were handed cannot be redeemed and retrying will not change
+        # that. Failing closed to DelegationEnded is the safe default, but it is
+        # a default — extend the code sets above rather than widening this branch.
         raise DelegationEnded(description)
     raise RuntimeError(f"{status} {error}: {description}")
 
@@ -129,17 +152,50 @@ PROTOCOL_SCOPES = frozenset({"openid", "profile", "email", "offline_access"})
 
 
 def _bare(scopes: frozenset[str]) -> frozenset[str]:
-    """Strip the resource prefix and drop protocol scopes, for subset comparison."""
+    """Strip the resource prefix and drop protocol scopes, for subset comparison.
+
+    Case-folds, because the casing of the returned `scope` is not documented.
+    Entra's own OBO example echoes lowercase in and lowercase out, but the
+    step-3 request in the guide asks for `Files.Read`, and this function raises
+    rather than logs — a casing mismatch must not be reported as a widening.
+    """
     return frozenset(
-        scope.rsplit("/", 1)[-1] for scope in scopes if scope not in PROTOCOL_SCOPES
+        scope.rsplit("/", 1)[-1].casefold()
+        for scope in scopes
+        if scope.casefold() not in PROTOCOL_SCOPES
     )
+
+
+# Discovery metadata and the JWKS client are per-tenant, long-lived, and safe to
+# cache; the *token* is the thing that must be resolved per request. Rebuilding
+# these on every call costs two extra round trips per inbound request and means
+# the signing-key cache never warms, which is a strange way to implement
+# "exchange per request". Cache the machinery, never the identity.
+_METADATA_CACHE: dict[str, dict] = {}
+_JWKS_CACHE: dict = {}
 
 
 def _discover(tenant: str) -> dict:
     """Read the tenant's OpenID configuration instead of hardcoding endpoints."""
+    cached = _METADATA_CACHE.get(tenant)
+    if cached is not None:
+        return cached
     url = f"{AUTHORITY}/{tenant}/v2.0/.well-known/openid-configuration"
     with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as response:
-        return json.loads(response.read())
+        metadata = json.loads(response.read())
+    _METADATA_CACHE[tenant] = metadata
+    return metadata
+
+
+def _jwks_client(tenant: str, jwks_uri: str):
+    """One PyJWKClient per tenant, so its signing-key cache survives requests."""
+    client = _JWKS_CACHE.get(tenant)
+    if client is None:
+        from jwt import PyJWKClient
+
+        client = PyJWKClient(jwks_uri)
+        _JWKS_CACHE[tenant] = client
+    return client
 
 
 def validate_inbound_token(token: str, tenant: str, audience: str) -> dict:
@@ -149,17 +205,24 @@ def validate_inbound_token(token: str, tenant: str, audience: str) -> dict:
     payload without checking the signature is an agent whose entire identity
     model is "whatever the caller typed". The audience check is the one people
     skip: a token minted for some other API is not a token for you, and
-    forwarding it downstream is the confused-deputy bug the MCP authorization
-    spec forbids in as many words.
+    forwarding it downstream is the confused-deputy bug the MCP specification
+    forbids in as many words.
+
+    Token version matters here, and the failure is baffling when it bites. The
+    issuer in the v2.0 discovery document ends in `/v2.0`; an app registration
+    that emits v1 tokens issues `https://sts.windows.net/{tid}/` instead, and
+    this call then fails the issuer check with nothing pointing at why. Set
+    `accessTokenAcceptedVersion` to 2 in the app manifest, or discover against
+    the v1 endpoint. The same split governs the claims: `preferred_username` is
+    v2-only and v1 carries `upn`.
     """
     try:
         import jwt  # PyJWT
-        from jwt import PyJWKClient
     except ImportError as error:  # fail closed, never fall back to decoding
         raise RuntimeError('install "pyjwt[crypto]" to validate inbound tokens') from error
 
     metadata = _discover(tenant)
-    signing_key = PyJWKClient(metadata["jwks_uri"]).get_signing_key_from_jwt(token)
+    signing_key = _jwks_client(tenant, metadata["jwks_uri"]).get_signing_key_from_jwt(token)
     return jwt.decode(
         token,
         signing_key.key,
