@@ -31,7 +31,7 @@ faq:
   - question: How do I give a LangChain tool a different API key for each user?
     answer: Add a parameter named runtime typed as ToolRuntime[YourContext], declare context_schema=YourContext on create_agent, and pass context=YourContext(user_id=...) to invoke. LangChain strips that parameter from the schema the model sees, so look the credential up inside the tool body using runtime.context. This is the langchain 1.3 idiom.
   - question: Does CrewAI retry a tool call that raises an exception?
-    answer: Yes, and more times than most people expect. In crewai 1.15.16 a tool whose _run raises is retried up to three attempts, and each attempt invokes the tool twice because of a fallback path in ToolUsage, so a single model tool call can execute the tool body six times. Return a crewai.tools.ToolFailure instead of raising and the body runs once.
+    answer: Yes, and more times than most people expect. In crewai 1.15.16 a tool whose _run raises is retried up to three attempts. When the model supplied arguments, each attempt invokes the tool twice because of a fallback path in ToolUsage, so one model tool call can execute the tool body six times; a tool called with no arguments skips that fallback and runs three times. Return a crewai.tools.ToolFailure instead of raising and the body runs once.
   - question: Does the OpenAI Agents SDK send my exception message to the model?
     answer: Yes, by default. In openai-agents 0.21.1 the default failure handler builds a fixed apology sentence and interpolates str(error) onto the end of it, which puts your exception text into the model's context. Pass your own failure_error_function to replace it, or failure_error_function=None to let the exception propagate instead.
   - question: Which agent framework validates tool arguments for me?
@@ -257,17 +257,20 @@ The pattern across all three is one function that maps exceptions to strings you
 
 Ask each framework how many times it will execute your tool body for one model tool call, and the answers are not close.
 
-**CrewAI: six, on the default settings.** `ToolUsage` retries a raising tool up to `_max_parsing_attempts`, which is 3 by default and 2 when a function-calling LLM from CrewAI's own bigger-models list is configured. Inside each attempt, the tool is invoked once with arguments filtered to the schema, and if that call raises for any reason — including from your tool body — the `except` branch invokes it a second time with the unfiltered arguments. Three attempts, two invocations each. Running that against a tool that posts a message produces six messages, and this is verified behaviour in crewai 1.15.16, not a reading of the docs. Returning a `ToolFailure` instead of raising takes it to one.
+**CrewAI: six, on the default settings.** `ToolUsage` retries a raising tool up to `_max_parsing_attempts`, which is 3 by default and 2 when a function-calling LLM from CrewAI's own bigger-models list is configured. Inside each attempt, the tool is invoked once with arguments filtered to the schema, and if that call raises for any reason — including from your tool body — the `except` branch invokes it a second time with the unfiltered arguments. Three attempts, two invocations each. Running that against a tool that posts a message produces six messages, and this is verified behaviour in crewai 1.15.16, not a reading of the docs. The doubling needs arguments to double: the fallback pair sits behind an `if calling.arguments:` check, so a tool the model calls with no arguments takes the `else` branch and executes three times rather than six. Returning a `ToolFailure` instead of raising takes either case to one.
 
-**LangChain: one, until you add `ToolRetryMiddleware`, and then it depends.** That middleware's `retry_on` defaults to `(Exception,)` — every exception, including the timeout on a request that already committed. Name the failures worth repeating:
+**LangChain: one, until you add `ToolRetryMiddleware`, and then it depends.** That middleware has two defaults that both need changing, and the second one is a trap. `retry_on` defaults to `(Exception,)` — every exception, including the timeout on a request that already committed. And `on_failure` defaults to `"continue"`, which does not re-raise when the attempts run out: it returns a `ToolMessage` of its own, built from the exception's type and `str(exc)`. Because retry sits inner to the sanitising wrapper from step 5, that message goes straight to the model and the wrapper never runs. Set both:
 
 ```python
 ToolRetryMiddleware(
     max_retries=2,
     tools=["post_message_tool"],
     retry_on=lambda exc: isinstance(exc, ChannelError) and exc.retryable,
+    on_failure="error",
 )
 ```
+
+This is the composition `ToolErrorMiddleware`'s own docstring prescribes — retry placed inner and configured with `on_failure="error"`, so exceptions reach the error-handling middleware rather than being formatted on the way past it. Skip it and a retryable failure whose message carries a request URL, a hostname, or a query-string token hands that text to the model through a stack that looks like it is sanitising everything.
 
 **OpenAI Agents SDK: one, always.** It has no function-tool retry at all; `ModelRetrySettings` is described in the SDK as opt-in retry for *model* calls. Transient upstream failures are yours to handle inside the tool.
 
@@ -306,7 +309,7 @@ All three consume MCP servers, and all three treat MCP tools as a separate popul
 - **CrewAI** takes them inline: `Agent(mcps=[...])`, where entries are URLs, connected-integration slugs, or the `MCPServerStdio`, `MCPServerHTTP`, and `MCPServerSSE` config objects from `crewai.mcp`. `crewai-tools[mcp]` also provides `MCPServerAdapter` as a context manager for finer control.
 - **OpenAI Agents SDK** has it built in: `Agent(mcp_servers=[...])` with `MCPServerStdio`, `MCPServerSse`, or `MCPServerStreamableHttp` from `agents.mcp`, plus `create_static_tool_filter(allowed_tool_names=[...])` to expose a subset and `cache_tools_list=True` for servers whose tool list is stable.
 
-Two things to carry over from step 5. An MCP tool's description and its error text are written by the server, not by you, and both reach the model — so a server you do not control is a prompt-injection surface with a schema attached. Filter the tool list to what you need rather than adopting whatever the server advertises. The MCP servers guide in the [connect pillar](/connect/) goes further into that trust boundary.
+Two things to carry over from step 5. An MCP tool's description and its error text are written by the server, not by you, and both reach the model — so a server you do not control is a prompt-injection surface with a schema attached. Filter the tool list to what you need rather than adopting whatever the server advertises. The [MCP servers guide](/connect/mcp-servers/) goes further into that trust boundary.
 
 ## Decision table
 
@@ -318,6 +321,7 @@ Two things to carry over from step 5. An MCP tool's description and its error te
 | Approval hook | `HumanInTheLoopMiddleware`, per tool call, with approve, edit, reject, and respond. Needs a checkpointer. | `Task(human_input=True)` reviews the final answer, after the tools have run. Not a write gate. | `needs_approval` per tool, static or computed. Resume through `RunState.approve` or `reject`. |
 | Retries of your tool body | None until `ToolRetryMiddleware`, which then retries every exception by default. | Up to six executions per model tool call when the tool raises. One when it returns `ToolFailure`. | None. |
 | MCP | `langchain-mcp-adapters`, `MultiServerMCPClient`, async tool loading. | `Agent(mcps=[...])` inline, or `MCPServerAdapter` from `crewai-tools[mcp]`. | Built in: `Agent(mcp_servers=[...])`, with tool filtering and list caching. |
+| Pick it when | The policy around the tool matters more than the tool. | The unit of work is a task decomposed across roles. | The tool call itself has to be right. |
 
 Now the part a comparison usually refuses to write.
 
@@ -344,7 +348,9 @@ If your agent serves many users with different access, the ordering is: OpenAI A
 - [ ] Writes above a threshold you have written down are behind an approval hook that runs *before* the call.
 - [ ] MCP tool lists are filtered to a named set, not adopted wholesale.
 - [ ] In CrewAI, no `Crew`, `Agent`, or tool instance is cached across users.
-- [ ] The framework version is pinned, and someone re-reads this list when it changes.
+- [ ] The framework version is pinned in your lockfile.
+
+Every item above is a property of a diff. The one thing that is not — re-reading this list when you bump a framework — belongs in whatever ritual already surrounds a dependency upgrade, because each of the defaults it guards against has changed at least once across these three projects.
 
 ## Failure modes
 
@@ -360,7 +366,7 @@ If your agent serves many users with different access, the ordering is: OpenAI A
 
 **Symptom:** a CrewAI agent posts the same message repeatedly, or a webhook fires several times, and the transcript shows a single tool call.
 
-**Cause:** the tool raised. CrewAI retried it up to three attempts, and each attempt invoked the tool twice through the argument-fallback path in `ToolUsage`. Six executions of a side effect, from one decision by the model.
+**Cause:** the tool raised. CrewAI retried it up to three attempts, and because the model supplied arguments, each attempt invoked the tool twice through the argument-fallback path in `ToolUsage`. Six executions of a side effect, from one decision by the model. A tool called with no arguments skips the fallback and stops at three, which is not much comfort.
 
 **Fix:** do not raise out of `_run`. Catch, and return `ToolFailure(message=..., retryable=...)`, which is recorded once and rendered to the model as text. Set `tool_failure_policy` on the agent to `'raise'` if a reported failure should stop the task rather than be narrated past. And treat this as the general case rather than a CrewAI quirk: any tool that writes should carry an idempotency key, because no framework's retry policy is a substitute for one.
 
@@ -460,13 +466,19 @@ async with FabriqClient(
     )
 ```
 
-The runnable version is `examples/connect-frameworks/fabriq_dx_agent.py`. Two honest caveats. Connection names, method names, and response shapes are per-deployment, so run `afctl tools list` against your own gateway instead of copying `my-slack` or `post_message` on faith. And the `af_sdk.dx` import path and the keyword names above come from the SDK's published README rather than from a run against a live gateway — I did not verify them end to end, so check `afctl auth status` and your installed version before assuming a signature. The property that survives either way is the one worth the dependency: a compromised agent process leaks a revocable gateway token instead of a standing grant on somebody's chat account, and the answer to "which user did this agent act for" comes out of one place rather than three frameworks' logs.
+The runnable version is `examples/connect-frameworks/fabriq_dx_agent.py`. Two caveats, and the first one will bite before the code runs. Both `af_sdk.dx` and `af_sdk.fabriq_client` come from the SDK's published README rather than from a run against a live gateway, and the published package has lagged its own README — verify the modules exist in the version you installed before copying either block:
+
+```bash
+python -c "import af_sdk.dx, af_sdk.fabriq_client"
+```
+
+Second, connection names, method names, and response shapes are per-deployment, so run `afctl tools list` against your own gateway instead of copying `my-slack` or `post_message` on faith. The property that survives either way is the one worth the dependency: a compromised agent process leaks a revocable gateway token instead of a standing grant on somebody's chat account, and the answer to "which user did this agent act for" comes out of one place rather than three frameworks' logs.
 
 Everything in the first eight steps stays correct if you would rather own that layer yourself. What a layer like [Agentic Fabriq](https://agenticfabriq.com) buys is the lifecycle, not the call — the choice is where the credential lifecycle lives, not whether you need one.
 
 ## Further reading
 
-The [connect pillar](/connect/) collects the per-system integrations these tools wrap — [connecting an agent to Gmail](/connect/gmail/) works through the same per-user grant problem against a provider that makes the consequences explicit, and the MCP servers guide covers the trust boundary that step 8 only sketches. The [govern pillar](/govern/) treats credential storage, rotation, and per-request policy as one subject rather than a per-framework setting, which is the right altitude once you have more than one agent. The [fail pillar](/fail/) has the incident patterns, including runaway tool loops and what leaks through prompt logs.
+The [connect pillar](/connect/) collects the per-system integrations these tools wrap — [connecting an agent to Gmail](/connect/gmail/) works through the same per-user grant problem against a provider that makes the consequences explicit, and the [MCP servers guide](/connect/mcp-servers/) covers the trust boundary that step 8 only sketches. The [govern pillar](/govern/) treats credential storage, rotation, and per-request policy as one subject rather than a per-framework setting, which is the right altitude once you have more than one agent. The [fail pillar](/fail/) has the incident patterns, including runaway tool loops and what leaks through prompt logs.
 
 Primary sources for the framework behaviour asserted above:
 

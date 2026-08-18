@@ -8,10 +8,15 @@ Nothing in this file holds a chat credential. The agent holds a token for the
 gateway; the gateway holds the per-user grant and decides, per request, whether
 this agent may act for this user against this connection.
 
-The `af_sdk.dx` import path and the keyword names below come from the SDK's
-published README. Confirm them against your installed version before copying:
-`afctl auth status` and `afctl tools list` will tell you what your gateway
-actually exposes, and connection names are per-deployment.
+Both `af_sdk.dx` and `af_sdk.fabriq_client` come from the SDK's published
+README rather than from a run against a live gateway, and the published package
+has lagged its own README. Confirm the modules exist in the version you
+installed before running this:
+
+    python -c "import af_sdk.dx, af_sdk.fabriq_client"
+
+Connection names are per-deployment; `afctl tools list` reports what your own
+gateway actually exposes.
 """
 
 from __future__ import annotations
