@@ -33,7 +33,7 @@ faq:
   - question: Can I stop an AI agent leaking an API key by telling it not to in the system prompt?
     answer: No. OWASP's LLM02:2025 entry states that restrictions placed in the system prompt "may not always be honored and could be bypassed via prompt injection or other methods". The instruction sits in the same context window as the key, so it is data the model weighs rather than a control that binds it.
   - question: Where does an agent's API key actually leak to?
-    answer: Most commonly into an observability trace, because content capture records the system instructions and messages verbatim. Other routes are a provider error string that echoes the token, a model response that summarizes its own configuration, an inherited environment in a subprocess or MCP server, and an outbound request built from injected content.
+    answer: The dullest route is an observability trace, because content capture records the system instructions and messages verbatim and needs no attacker, no injection, and no unusual model behaviour to happen. Other routes are a provider error string that echoes the token, a model response that summarizes its own configuration, an inherited environment in a subprocess or MCP server, and an outbound request built from injected content.
   - question: Is a pre-signed URL a credential?
     answer: Yes. AWS documents that presigned URLs "are bearer tokens that grant access to those who possess them", and Google Cloud states that anyone in possession of a signed URL can use it while it is active regardless of whether they have an account. Treat one in a log or a ticket as an exposed credential.
   - question: Should I rotate or revoke a leaked agent credential first?
@@ -68,13 +68,13 @@ That is the ordinary version. The paths below are the ones worth knowing individ
 
 2. **A tool returns a raw error containing the credential.** The provider's 401 body echoes the token it rejected, or the client library's exception message includes the full request including headers, or a traceback carries the request URL with its query string. The agent framework catches the exception, stringifies it, and appends it to the conversation as a tool result so the model can decide what to do next. Nobody wrote a line of code that put the secret in the context. The error handler did it, and error handlers are the code least likely to be read.
 
-3. **Observability captures the full payload.** This is the path nobody wrote code for, because capturing the payload is the feature. The [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md) define `gen_ai.system_instructions`, `gen_ai.input.messages`, and `gen_ai.output.messages`, and mark all three Opt-In with the warning that they are "likely to contain sensitive information including user/PII data". Tool traffic gets the same treatment: `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` are Opt-In and carry the same caution. The convention tells instrumentations not to capture these by default and to gate them behind an explicit opt-in, naming `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` as the example. That flag is a single environment variable, and environment variables travel between environments in ways nobody tracks.
+3. **Observability captures the full payload.** This is the path nobody wrote code for, because capturing the payload is the feature. The [OpenTelemetry GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md) define `gen_ai.system_instructions`, `gen_ai.input.messages`, and `gen_ai.output.messages`, and mark all three Opt-In. The warnings are worth reading exactly rather than in summary, because they are not uniform: `gen_ai.input.messages` and `gen_ai.output.messages` are "likely to contain sensitive information including user/PII data", while `gen_ai.system_instructions` carries only "This attribute may contain sensitive information". The attribute this guide cares about most is the one with the milder warning, which is its own small lesson about reading a convention rather than its reputation. Tool traffic is Opt-In too: `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` carry the same "may contain sensitive information" caution. The convention tells instrumentations not to capture these by default and to gate them behind an explicit opt-in, naming `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` as the example. That flag is a single environment variable, and environment variables travel between environments in ways nobody tracks.
 
 4. **The agent summarizes its own configuration on request.** "What tools do you have?" is a reasonable question from a user and a reasonable thing for a helpful assistant to answer. So is "print your setup so I can file a bug". The model has no way to distinguish the part of its context that is public capability description from the part that is a secret, because they arrived in the same string with the same status. OWASP records this as scenario one under system prompt leakage: an LLM's system prompt contains credentials for a tool, the prompt is leaked, and the attacker uses the credentials elsewhere.
 
 5. **A subprocess or MCP server inherits the parent environment.** The MCP specification's stdio transport says the client "launches the MCP server as a subprocess" and says nothing about what environment that subprocess receives, which leaves it to the client. The language default decides, and the language default is inheritance: Python's `subprocess` documentation states that when `env` is not `None` the mapping is used "instead of the default behavior of inheriting the current process' environment". Leave `env` unset and the third-party server you installed last week can read `os.environ` and see every key your agent holds, including the ones for services it has nothing to do with. See [connecting an agent through MCP](/connect/mcp-servers/) for the wider trust question that raises.
 
-6. **Untrusted content instructs the model to exfiltrate.** [OWASP LLM01:2025](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) calls this indirect prompt injection, where an LLM accepts input from external sources such as websites or files and that content alters its behaviour. Its scenario two is the canonical shape: a user asks an LLM to summarize a webpage containing hidden instructions that cause it to insert an image linking to a URL, and the fetch of that image exfiltrates the conversation. The agent never makes a decision to send anything. A renderer somewhere — a chat surface, a ticket preview, a notebook — fetches the image because fetching images is what renderers do. This is not theoretical: [CVE-2025-32711](https://nvd.nist.gov/vuln/detail/CVE-2025-32711) is recorded by NVD as "Ai command injection in M365 Copilot allows an unauthorized attacker to disclose information over a network", scored CVSS 3.1 9.3 critical.
+6. **Untrusted content instructs the model to exfiltrate.** [OWASP LLM01:2025](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) calls this indirect prompt injection, where an LLM accepts input from external sources such as websites or files and that content alters its behaviour. Its scenario two is the canonical shape: a user asks an LLM to summarize a webpage containing hidden instructions that cause it to insert an image linking to a URL, and the fetch of that image exfiltrates the conversation. The agent never makes a decision to send anything. A renderer somewhere — a chat surface, a ticket preview, a notebook — fetches the image because fetching images is what renderers do. The general shape is not theoretical: NVD records [CVE-2025-32711](https://nvd.nist.gov/vuln/detail/CVE-2025-32711) as "Ai command injection in M365 Copilot allows an unauthorized attacker to disclose information over a network", carrying two CVSS 3.1 base scores — 9.3 critical from Microsoft as the assigning CNA, and 7.5 high from NVD's own analysis. Note what that record does and does not give you: it establishes that injection against a shipped product ended in disclosure over a network, and it says nothing about the delivery mechanism. The image-link step above comes from OWASP, not from the CVE.
 
 ### Why the model is not a trust boundary
 
@@ -100,14 +100,14 @@ This generalizes past model providers to every hop: the trace backend, the log a
 
 ## Step by step
 
-One path from a leaking agent to one that has nothing to leak, then the detection and response layers that sit behind it. The runnable sources are in `examples/fail-token-leakage/`, and every one of them is built so that running it sends nothing anywhere: the credential is fake, the exfiltration host is under `.invalid` — the top-level domain RFC 2606 reserves for names that are "sure to be invalid" — and the only outbound path is a list in the same process. Read `examples/fail-token-leakage/toy_model.py` first; it states the safety properties and the exact limits of what the demonstration proves.
+One path from a leaking agent to one that has nothing to leak, then the detection and response layers that sit behind it. The runnable sources are in `examples/fail-token-leakage/`, and the three demonstration files — `leaky_agent.py`, `brokered_agent.py`, and `outbound_scan.py`, plus the `toy_model.py` they share — are built so that running them sends nothing anywhere: the credential is fake, the exfiltration host is under `.invalid` — the top-level domain RFC 2606 reserves for names that are "sure to be invalid" — and the only outbound path is a list in the same process. The fourth file, `fabriq_broker.py`, is the exception and does dial a real gateway; it is a reference sample for `## Doing this at scale`, not part of the demonstration. Read `examples/fail-token-leakage/toy_model.py` first; it states the safety properties and the exact limits of what the demonstration proves.
 
 ### 1. Reproduce it: put the key in the system prompt
 
 Start from the version that looks correct. The key is not hardcoded; it comes from the environment. The system prompt forbids revealing it. The tool list is short. `examples/fail-token-leakage/leaky_agent.py` is that agent:
 
 ```python
-API_KEY = os.environ.get("BILLING_API_KEY", DEMO_CREDENTIAL)
+API_KEY = os.environ.get("TOKEN_LEAKAGE_DEMO_FAKE_KEY", DEMO_CREDENTIAL)
 
 SYSTEM_PROMPT = f"""\
 You are a billing support agent.
@@ -128,7 +128,7 @@ TOOLS = [
 ]
 ```
 
-Two secrets, two paths, one prompt. The bearer token is path one in its obvious form. The tool description carries a presigned URL, which is path one in the form that survives code review, because a reviewer reads it as documentation.
+Two secrets, one path, one prompt. Both are path one; they differ in how they get past you. The bearer token is the obvious form. The tool description carries a presigned URL, which is the form that survives code review, because a reviewer reads it as documentation rather than as a credential — and, per the signed-URL section above, it is a bearer token either way.
 
 The document the agent is asked to summarize contains an injected instruction. It is deliberately benign — it asks the agent to append its configuration and add a status link so the operator can confirm which environment answered — because a leak does not require malice, only a sentence that reads like an instruction:
 
@@ -204,15 +204,24 @@ def _redact(text: str, secret: str) -> str:
     return text.replace(secret, "[redacted:billing]")
 ```
 
-The broker knows the exact bytes it just used, so it does not guess what a credential looks like. That is the one redaction that cannot miss a format it has never seen, and it is available only to the component that holds the secret. A scanner sitting downstream, looking at strings whose provenance it does not know, has to guess. This is the general shape of the argument for a broker: the component that holds the secret is the only one that can reason about it precisely.
+Step 4 puts this line under test rather than taking it on trust. The broker knows the exact bytes it just used, so it does not guess what a credential looks like. That is the one redaction that cannot miss a format it has never seen, and it is available only to the component that holds the secret. A scanner sitting downstream, looking at strings whose provenance it does not know, has to guess. This is the general shape of the argument for a broker: the component that holds the secret is the only one that can reason about it precisely.
 
 One honesty note the file also carries. In a single script, the broker is an object in the same process, which keeps the credential out of the *context* and therefore closes the model-facing paths. It does not close path five, because a subprocess launched from that process still inherits its environment. Closing that one means the broker is a separate process or a service, and the agent holds only a token addressed to it.
 
 ### 4. Replay the same injection against the brokered agent
 
-Send the identical document through and assert, rather than observe:
+Send the identical document through and assert, rather than observe. The order of these three lines is the whole point — the tool result is composed back into the conversation *before* the guard runs, so the redaction is inside the assertion rather than beside it:
 
 ```python
+tool_result = broker.call("billing", "get_invoice")
+messages.append({"role": "tool", "content": tool_result})
+
+try:
+    assert_no_secret_in_context(messages, DEMO_CREDENTIAL)
+except LeakGuard as exc:
+    print(f"\nFAIL: {exc}. Nothing was sent to the model.")
+    return 1
+
 checks = {
     "model context": any(DEMO_CREDENTIAL in m["content"] for m in messages),
     "model output": DEMO_CREDENTIAL in output,
@@ -223,7 +232,9 @@ if any(checks.values()):
     return 1
 ```
 
-The script exits non-zero if any check is true, which makes it a test rather than a demonstration. That is the deliverable: a property about a payload, checkable in CI, that the version in step 1 cannot offer at any price because its correctness depends on what a model chose to say.
+The script exits non-zero if the guard fires or if any check is true, which makes it a test rather than a demonstration. That is the deliverable: a property about a payload, checkable in CI, that the version in step 1 cannot offer at any price because its correctness depends on what a model chose to say.
+
+Check that your own version of this actually covers the control it credits. Mutate `Broker._redact` to `return text` and re-run: the unredacted error is appended to the conversation, the guard raises, and the script exits 1 without ever calling the model. If your test still passes after that mutation, it is asserting on a payload the tool result never joined, and the redaction you are relying on is untested. Compose first, assert second.
 
 The run is more interesting than a clean pass would suggest. The model still obeys the injection — it appends its configuration and it builds the status link, exactly as before. What changed is that the configuration is the word `billing`. The attack still works and no longer matters, which is what closing a class looks like as opposed to blocking an instance.
 
@@ -267,11 +278,11 @@ def canary_alert(used_credential: str) -> str | None:
 
 Order matters here more than speed, and the common instinct gets it backwards.
 
-**Revoke first.** Rotation and revocation are different operations, and issuing a new credential does nothing to the old one. A key that has been rotated but not revoked keeps working until its natural expiry, which for a long-lived API key is never. So the first action is to make the leaked value stop authenticating: delete or deactivate the key, revoke the token grant, or, for a presigned URL, pull one of the levers described above. Do this before you know the blast radius. The cost of revoking early is an outage you can fix in minutes; the cost of revoking late is unbounded and grows while you investigate.
+**Revoke first.** Rotation and revocation are different operations, and issuing a new credential does nothing to the old one. A key that has been rotated but not revoked keeps working until its natural expiry, which for a long-lived API key is never. So the first action is to make the leaked value stop authenticating: delete or deactivate the key, revoke the token grant, or, for a presigned URL, pull one of the levers described above. Revoking an OAuth grant deserves one caution: [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) says an authorization server that supports access token revocation *SHOULD* also invalidate all access tokens based on the same grant. SHOULD, not MUST — so whether an access token already sitting in a process's memory dies with the grant is a property of your provider rather than a guarantee of the protocol, and it is the reason the verification below is a step and not a formality. Do this before you know the blast radius. The cost of revoking early is an outage you can fix in minutes; the cost of revoking late is unbounded and grows while you investigate.
 
 **Rotate second.** Now issue the replacement and get the service back up. Doing it in this order means there is never a window in which both the leaked credential and the new one are live, which also keeps the audit log readable: every action after the revocation timestamp belongs to the new credential, so the two are cleanly separable when you come to the third step.
 
-**Determine reach third, from the audit log.** This is the only step that is not urgent and the only one that produces an answer. Between the first moment the credential could have been read and the revocation timestamp, list every call made with it: which resources, from which source addresses, on whose behalf. What you are looking for is calls you cannot attribute to your own agent runs. This step is also the audit of your audit: if you cannot bound the exposure because the log does not record the acting identity, you have found the second incident, and it is the more important one. Designing for that answer is its own subject, covered under credential handling and audit trails in the [governance pillar](/govern/).
+**Determine reach third, from the audit log.** This is the only step that is not urgent and the only one that produces an answer. Between the first moment the credential could have been read and the revocation timestamp, list every call made with it: which resources, from which source addresses, on whose behalf. What you are looking for is calls you cannot attribute to your own agent runs. This step is also the audit of your audit: if you cannot bound the exposure because the log does not record the acting identity, you have found the second incident, and it is the more important one. Designing a log that can answer it is its own subject, covered field by field in [audit trails and compliance for agent actions](/govern/audit/).
 
 Then handle the copies you do not control. Ask the trace vendor, the helpdesk, and the log aggregator to purge, knowing you may not get it and cannot verify it. Assume the model provider retained the prompt for its stated window. This is the step that justifies the whole guide: the reason to keep secrets out of the context is that this step has no good version.
 
@@ -279,9 +290,9 @@ Then handle the copies you do not control. Ask the trace vendor, the helpdesk, a
 
 | Where the secret lives | Leak paths closed | What it costs | Residual risk |
 | --- | --- | --- | --- |
-| In the model's context — system prompt, tool description, message history | None. All six paths are open, and the only defence is an instruction OWASP describes as bypassable. | Nothing up front. This is what you get by default. | Total. The credential is one compliant completion, one captured span, or one echoed error away from anywhere. |
-| In the agent process, not in the context — env var, agent code makes the call | Paths one, four, and six outright, and most of three. The model cannot emit a string it was never shown. | An afternoon. Move interpolation out of the prompt into the HTTP client. | Paths two and five stay open: a raw provider error can still put the token in the context, and any subprocess or MCP server inherits the environment. Path three is only half closed — the GenAI span attributes hold no secret, but HTTP client instrumentation can still capture an `Authorization` header. Signed URLs the agent generates are still returned into the context as data. |
-| Held only by a broker the agent addresses by name | All six for the underlying credential. A separate-process broker closes environment inheritance as well, since the agent's environment has nothing in it. | A component to run, a connection registry to maintain, and one more failure domain in the request path. | The broker token in the agent process is still a credential — revocable in one place and scoped to the broker, but real. The broker's own logs must not echo what it redacts. Anything the broker returns into the context, such as a signed URL, is back in scope. |
+| **In the model's context** — system prompt, tool description, message history. Never choose this; it is the default you inherit. | None. All six paths are open, and the only defence is an instruction OWASP describes as bypassable. | Nothing up front. This is what you get by default. | Total. The credential is one compliant completion, one captured span, or one echoed error away from anywhere. |
+| **In the agent process, not in the context** — env var, agent code makes the call. Choose this when you have one or two agents and need the model-facing paths closed this week. | Paths one, four, and six outright, and most of three. The model cannot emit a string it was never shown. | An afternoon. Move interpolation out of the prompt into the HTTP client. | Paths two and five stay open: a raw provider error can still put the token in the context, and any subprocess or MCP server inherits the environment. Path three is only half closed — the GenAI span attributes hold no secret, but HTTP client instrumentation can still capture an `Authorization` header. Signed URLs the agent generates are still returned into the context as data. |
+| **Held only by a broker** the agent addresses by name. Choose this when the count of places holding a production credential is the thing that scares you. | All six for the underlying credential. A separate-process broker closes environment inheritance as well, since the agent's environment has nothing in it. | A component to run, a connection registry to maintain, and one more failure domain in the request path. | The broker token in the agent process is still a credential — revocable in one place and scoped to the broker, but real. The broker's own logs must not echo what it redacts. Anything the broker returns into the context, such as a signed URL, is back in scope. |
 
 The middle row is where most teams should be by the end of the week and where few should stop. It is cheap, and it closes every path that runs through the model. What it does not do is change the answer to "how many places hold a production credential", which is the question that scales badly: every agent, every environment, every replica, times every provider. The third row changes that number to one, and that is the only reason to pay for it.
 
@@ -317,7 +328,7 @@ The middle row is where most teams should be by the end of the week and where fe
 
 **Cause:** the tool wrapper does `except Exception as exc: return str(exc)`. Provider error bodies and client library exceptions frequently include the request that failed, headers and query string included.
 
-**Fix:** never return an exception's string form to the model. Map errors to a fixed vocabulary you control — `auth_failed`, `rate_limited`, `not_found` — and log the detail separately under access control. Where the caller holds the secret, redact by exact value as `Broker._redact` does in the example, since identity matching cannot miss a format.
+**Fix:** never return an exception's string form to the model. Map errors to a fixed vocabulary you control — `auth_failed`, `rate_limited`, `not_found` — and log the detail separately under access control. Where the caller holds the secret, redact by exact value as `Broker._redact` does in the example, for the reason step 3 gives.
 
 ### The agent answered a question about itself
 
@@ -347,7 +358,7 @@ The middle row is where most teams should be by the end of the week and where fe
 
 **Symptom:** a request to a domain nobody recognises appears in egress logs, with a long query string, originating from a rendering surface rather than from the agent's HTTP client.
 
-**Cause:** indirect prompt injection, followed by an automatic fetch. The model copied context into a URL and a renderer resolved it. CVE-2025-32711 is the recorded instance of this shape against a shipped product.
+**Cause:** indirect prompt injection, followed by an automatic fetch. The model copied context into a URL and a renderer resolved it. CVE-2025-32711 is a recorded case of injection against a shipped product ending in network disclosure; its NVD entry does not describe the delivery, so treat OWASP's scenario as the source for this particular mechanism.
 
 **Fix:** the durable fix is having nothing worth exfiltrating in the context, since blocking a specific delivery channel only moves the problem. Alongside that, do the channel work: restrict which hosts rendered content may load, and do not auto-fetch URLs the model constructed from untrusted input. Both are worth doing; only the first is a fix.
 
@@ -357,7 +368,7 @@ The middle row is where most teams should be by the end of the week and where fe
 
 **Cause:** the token had an in-house or newly changed format, so no pattern matched it. Pattern-based detection finds what it has been taught to find.
 
-**Fix:** add exact-value matching over the credentials your vault actually issued, which cannot miss a format — and accept its own gap, which is any secret that was never registered. Two backstops with different blind spots is the best available detection story, and it is still a backstop.
+**Fix:** add exact-value matching over the credentials your vault actually issued, and accept the gap that comes with it — any secret that was never registered. Two backstops with different blind spots is the best available detection story, and it is still a backstop.
 
 ### You rotated first, and the leaked key kept working
 
@@ -365,7 +376,7 @@ The middle row is where most teams should be by the end of the week and where fe
 
 **Cause:** rotation issued a new credential and nobody invalidated the old one. Most providers let both live simultaneously, by design, so that rotation does not cause an outage.
 
-**Fix:** revoke, then rotate, in that order, and verify the revocation by making a call with the old value and confirming it fails. Write the ordering into the runbook, because the pressure during an incident is always toward restoring service first, which is exactly the instinct that leaves the leaked key alive.
+**Fix:** revoke, then rotate, in that order, and verify the revocation empirically by making a call with the old value and confirming it fails. Empirically is the operative word: as step 7 notes, an OAuth server only *SHOULD* invalidate access tokens issued under a revoked grant, so the console saying "revoked" is a claim about the grant and not about the token in someone's memory. Write the ordering into the runbook, because the pressure during an incident is always toward restoring service first, which is exactly the instinct that leaves the leaked key alive.
 
 ## Doing this at scale
 
@@ -407,15 +418,15 @@ Be precise about what this buys, because the honest version is more useful than 
 
 ## Further reading
 
-The two sibling guides this one leans on do not exist yet: credential storage and rotation, and audit trails that can answer the reach question in step 7, both live under the [governance pillar](/govern/). For the adjacent version of the same problem where the leaked material is data rather than a credential, [connecting an agent to databases](/connect/databases/) covers keeping query results and connection strings out of a context window, and the [failure pillar](/fail/) collects the rest of the incident patterns. If your agent talks to third-party tool servers, [connecting an agent through MCP](/connect/mcp-servers/) covers the trust boundary that path five crosses.
+Two sibling guides carry the parts this one hands off. [Credential vaulting and rotation for agents](/govern/credentials/) covers where the broker's secrets actually live, how to issue short-lived credentials per request, and how to rotate without downtime — which is the machinery behind step 7's second action. [Audit trails and compliance for agent actions](/govern/audit/) covers the log that answers step 7's third action, field by field, including the redaction question a leak makes urgent. Both sit under the [governance pillar](/govern/). For the adjacent version of the same problem where the leaked material is data rather than a credential, [connecting an agent to databases](/connect/databases/) covers keeping query results and connection strings out of a context window, and the [failure pillar](/fail/) collects the rest of the incident patterns. If your agent talks to third-party tool servers, [connecting an agent through MCP](/connect/mcp-servers/) covers the trust boundary that path five crosses.
 
 Primary sources for everything asserted above:
 
 - [OWASP LLM07:2025 System Prompt Leakage](https://genai.owasp.org/llmrisk/llm072025-system-prompt-leakage/) — that the system prompt is neither a secret nor a security control, that credentials and connection strings do not belong in it, and the guidance to externalize such data to systems the model does not access.
 - [OWASP LLM02:2025 Sensitive Information Disclosure](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/) — that system prompt restrictions on what the model returns may not be honoured and can be bypassed by prompt injection.
 - [OWASP LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) — direct and indirect injection, the hidden-instruction image-link exfiltration scenario, that no fool-proof prevention is known, and the guidance to treat the model as an untrusted user when testing trust boundaries.
-- [CVE-2025-32711 at NVD](https://nvd.nist.gov/vuln/detail/CVE-2025-32711) — the recorded description and CVSS 3.1 score for the M365 Copilot AI command injection leading to information disclosure over a network.
-- [OpenTelemetry GenAI span conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md) — the `gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result` attributes, their Opt-In requirement level, the sensitive-data warnings, and the `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` opt-in example.
+- [CVE-2025-32711 at NVD](https://nvd.nist.gov/vuln/detail/CVE-2025-32711) — the recorded description of the M365 Copilot AI command injection leading to information disclosure over a network, and its two CVSS 3.1 base scores: 9.3 critical from Microsoft as the assigning CNA, 7.5 high from NVD's own analysis. The record does not describe the delivery mechanism.
+- [OpenTelemetry GenAI span conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md) — the `gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result` attributes, their Opt-In requirement level, the two different sensitive-data warnings ("likely to contain sensitive information including user/PII data" on the message lists, "may contain sensitive information" on system instructions and tool call attributes), and the `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` opt-in example.
 - [MCP specification: transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) — that the stdio client launches the server as a subprocess, and the absence of any statement about the subprocess environment.
 - [Python `subprocess` documentation](https://docs.python.org/3/library/subprocess.html) — that a supplied `env` is used instead of the default behaviour of inheriting the current process's environment.
 - [Download and upload objects with presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html) — that presigned URLs are bearer tokens limited by the creator's permissions, the 12-hour console and 7-day CLI/SDK ceilings, that a presigned URL expires when its signing credential is revoked, deleted, or deactivated, and the `s3:signatureAge` bucket policy condition.
@@ -425,4 +436,5 @@ Primary sources for everything asserted above:
 - [About secret scanning](https://docs.github.com/en/code-security/secret-scanning/introduction/about-secret-scanning) — the scan surface across Git history, issues, and pull requests, and the partner program notifying providers so they can revoke.
 - [About push protection](https://docs.github.com/en/code-security/secret-scanning/introduction/about-push-protection) — blocking a push that contains a detected secret.
 - [Canarytokens AWS API keys token](https://docs.canarytokens.org/guide/aws-keys-token.html) — a planted AWS key that alerts on use, and the documented 2 to 30 minute alert delay.
+- [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009) — that an authorization server supporting access token revocation SHOULD, not MUST, also invalidate access tokens issued under a revoked grant.
 - [RFC 2606](https://www.rfc-editor.org/rfc/rfc2606) — the reserved `.invalid` and `.example` names that make the runnable demonstration safe.

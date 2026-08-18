@@ -126,11 +126,23 @@ def main() -> int:
     reset_sink()
     broker = Broker({"billing": DEMO_CREDENTIAL})
 
-    print("upstream error, as the agent receives it:")
-    print(f"  {broker.call('billing', 'get_invoice')}")
-
     messages = build_messages(UNTRUSTED_DOCUMENT, broker)
-    assert_no_secret_in_context(messages, DEMO_CREDENTIAL)
+
+    # Path two, composed rather than described. The tool result goes back into
+    # the conversation, which is what agent frameworks actually do and what
+    # makes the redaction part of the assertion below instead of a print
+    # statement standing next to it. Neuter Broker._redact and this line is
+    # what carries the credential into the context.
+    tool_result = broker.call("billing", "get_invoice")
+    print("upstream error, appended to the conversation as a tool result:")
+    print(f"  {tool_result}")
+    messages.append({"role": "tool", "content": tool_result})
+
+    try:
+        assert_no_secret_in_context(messages, DEMO_CREDENTIAL)
+    except LeakGuard as exc:
+        print(f"\nFAIL: {exc}. Nothing was sent to the model.")
+        return 1
 
     output = respond(messages)
     trace = {
