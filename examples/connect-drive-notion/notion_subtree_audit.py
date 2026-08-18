@@ -21,6 +21,7 @@ Run:
 from __future__ import annotations
 
 import os
+import random
 import sys
 import time
 from typing import Any, Iterator
@@ -36,7 +37,13 @@ NOTION_VERSION = "2026-03-11"
 
 # "an average of three requests per second, with some bursts beyond the
 # average allowed" -- https://developers.notion.com/reference/request-limits
-MIN_INTERVAL_SECONDS = 1 / 3
+#
+# Pacing at exactly 1/3s targets the documented *average*, which means roughly
+# half your requests arrive at or above it and 429s become a design decision
+# rather than an accident. Pace under the average, and jitter so that parallel
+# workers do not synchronise into a burst.
+BASE_INTERVAL_SECONDS = 0.4
+JITTER_SECONDS = 0.1
 
 MAX_DEPTH = 12
 _last_call = 0.0
@@ -63,7 +70,8 @@ class NotionError(RuntimeError):
 
 def _throttle() -> None:
     global _last_call
-    wait = MIN_INTERVAL_SECONDS - (time.monotonic() - _last_call)
+    interval = BASE_INTERVAL_SECONDS + random.random() * JITTER_SECONDS
+    wait = interval - (time.monotonic() - _last_call)
     if wait > 0:
         time.sleep(wait)
     _last_call = time.monotonic()
