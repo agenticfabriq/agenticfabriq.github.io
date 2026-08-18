@@ -33,7 +33,7 @@ faq:
   - question: Should an AI agent use a Slack bot token or a user token?
     answer: A bot token, which starts with xoxb-. Slack states that write actions taken with a user token are performed as if by the user themselves, so a user token makes the audit trail name a human for something the agent did.
   - question: Which Slack scopes does an AI agent need to read and reply in a channel?
-    answer: channels:read to resolve a channel name to an id, channels:history to read public channel messages, and chat:write to post. The app must also be a member of the channel; the scope alone is not enough.
+    answer: channels:read to resolve a channel name to an id, channels:history to read public channel messages, and chat:write to post. With a bot token the app must also be a member of the channel; the scope alone is not enough.
   - question: How do you verify that a request really came from Slack?
     answer: Compute an HMAC-SHA256 of the string v0:{timestamp}:{raw request body} keyed with the app's signing secret, prefix the hex digest with v0=, and compare it against the X-Slack-Signature header in constant time. Reject any X-Slack-Request-Timestamp more than five minutes from local time.
   - question: What is the difference between Socket Mode and the Events API request URL?
@@ -46,11 +46,11 @@ faq:
 
 ## TL;DR
 
-- Give the agent a bot token (`xoxb-`). Slack's own token reference says write actions with a user token (`xoxp-`) are "performed as if by the user themselves", which means your audit trail will name a person for something software did.
+- Give the agent a bot token (`xoxb-`). A user token (`xoxp-`) makes Slack record a human as the author of everything the agent writes, and Slack documents it as reaching all public conversations rather than only the ones the agent was invited to.
 - Scopes gate methods; channel membership gates data. `channels:history` grants "View messages and other content in public channels that your Slack app has been added to" — two separate gates, and forgetting the second one produces `not_in_channel` on a channel you can already list.
 - Verify every inbound request: HMAC-SHA256 over `v0:{timestamp}:{raw body}` keyed with the signing secret, compared in constant time against `X-Slack-Signature`, with anything more than five minutes off `X-Slack-Request-Timestamp` rejected outright.
 - Socket Mode removes the public request URL entirely — app-level `xapp-` token, `connections:write`, `apps.connections.open` — and in exchange Slack does not currently allow Socket Mode apps in the public Slack Marketplace.
-- Read throughput is the sharp edge, not write throughput: an app distributed outside the Slack Marketplace, newly created or newly installed since 29 May 2025, gets `conversations.history` at one request per minute returning at most 15 objects. Internal customer-built apps are exempt.
+- Read throughput is the sharp edge, not write throughput: an app commercially distributed outside the Slack Marketplace, newly created or newly installed since 29 May 2025, gets `conversations.history` at one request per minute returning at most 15 objects. Internal customer-built apps are exempt.
 
 ## Who this is for
 
@@ -60,7 +60,7 @@ You are putting an agent into a Slack workspace where it will read channels, ans
 
 The failure starts as a shortcut that looks like empathy for the user. An agent should behave the way a person behaves, so someone adds `user_scope=channels:history,chat:write` to the install URL and hands the agent the resulting `xoxp-` token. It works immediately, which is the trap. From that moment Slack records the human as the author of everything the agent writes — the token reference says write actions with a user token are "performed as if by the user themselves", and there is no field on a Slack message that says "an app did this on someone's behalf". Six months later, when someone asks who sent the message that pasted a customer's name into a shared channel, the honest answer is "an agent" and the recorded answer is a person's name. That gap is the whole governance problem in one line, and it is why [delegated identity](/govern/) is a design decision rather than a detail.
 
-The read side fails differently. A user grant is attached to a person rather than to a task, so it tracks that person's entitlements as they change — nobody re-reviews an agent's access because an engineer joined the incident channel last Tuesday. One caveat worth stating rather than glossing: Slack's current scope reference describes `channels:history` identically for user and bot tokens, as messages "in public channels that your Slack app has been added to", so I cannot tell you from the documentation alone that a user token sees strictly more than a bot token does. Confirm the reach of any user scope you are considering against your own workspace. The attribution argument above stands on its own and is the reason to avoid the user token regardless.
+The read side is larger than it looks, and Slack documents it. The `conversations.history` reference tabulates what each token type reaches: a bot token gets "Any conversation the relevant bot is a member of", and a user token gets "Any private conversation the user is a member of, and all public conversations". Its error table says the same thing from the other direction — "Only user tokens can access public channels they are not in." So an agent holding an `xoxp-` token with `channels:history` reads every public channel in the workspace, including the ones nobody invited it to and the ones created next month. Membership stops being a gate at all. The grant is also attached to a person rather than to a task, so it tracks that person's entitlements as they change, and nobody re-reviews an agent's access because an engineer joined the incident channel last Tuesday.
 
 The second failure is quieter and has no error message at all. A bot token with `channels:history`, `im:history`, `files:read`, and `users:read` accumulates. Not because anything went wrong — because that is what the scopes do. `users:read` grants "View people in a workspace", which is the directory. `files:read` grants "View files shared in channels and conversations that your Slack app has been added to", which is every PDF, screenshot, and spreadsheet anyone dropped in a channel the bot was invited to. `im:history` grants direct messages the app was added to. None of these announces itself. The agent simply gets a slightly larger view every time someone invites it somewhere, and the union of those invitations is never reviewed by anyone, because there is no page in Slack that says "here is everything this app can now read". Least privilege here is therefore not a scope decision you make once at install time — it is a standing review of scopes times memberships, which is the framing the [govern pillar](/govern/) takes.
 
@@ -93,17 +93,17 @@ These are the bot scopes that matter for an agent, quoted from Slack's scope ref
 | `mpim:history` | View messages and other content in group direct messages that your Slack app has been added to |
 | `chat:write` | Send messages as your Slack app |
 | `chat:write.public` | Send messages to channels your Slack app isn't a member of |
-| `channels:join` | Required by `conversations.join`, so the app can add itself to a public channel |
+| `channels:join` | Join public channels in a workspace |
 | `files:read` | View files shared in channels and conversations that your Slack app has been added to |
 | `users:read` | View people in a workspace |
 | `users:read.email` | View email addresses of people in a workspace |
 | `app_mentions:read` | View messages that directly mention your Slack app in conversations that the app is in |
 
-The read-and-reply agent in this guide needs exactly three: `channels:read`, `channels:history`, `chat:write`. Add `app_mentions:read` if the agent should be triggered by being mentioned rather than by reading everything.
+The read-and-reply agent in this guide needs exactly three: `channels:read`, `channels:history`, `chat:write`. Add `app_mentions:read` if the agent should be triggered by being mentioned rather than by reading everything. `channels:join` is the scope [`conversations.join`](https://docs.slack.dev/reference/methods/conversations.join/) requires, so an app can add itself to a public channel instead of waiting for an invite.
 
-Note what the `*:history` descriptions have in common: they are bounded by "that your Slack app has been added to". That is a real limit and it is the best property Slack's model has. An app with `channels:history` cannot read a public channel nobody invited it to. But the same sentence contains the trap. The bound is **membership, not time**. `conversations.history` takes `oldest`, `latest`, and a pagination `cursor`, with no floor on how far back you may page, so the moment someone types `/invite @agent` in a channel that has existed for three years, the agent is one paginated loop away from the whole thing — the incident retro, the vendor negotiation, the thread where somebody pasted a production connection string. Nobody experiences this as granting access; they experience it as adding a bot to a channel.
+Note what the `*:history` descriptions have in common: they are bounded by "that your Slack app has been added to". That is a real limit and it is the best property Slack's model has. A bot token with `channels:history` cannot read a public channel nobody invited it to, which is the asymmetry against user tokens that The problem set out. But the same sentence contains the trap. The bound is **membership, not time**. `conversations.history` documents `oldest` with a default of `0` and instructs you to "Call the method with no `oldest` or `latest` arguments to read the entire history for a conversation". Slack's unit of access is the conversation, not a time slice. So the moment someone types `/invite @agent` in a channel that has existed for three years, the agent is one paginated loop away from the whole thing — the incident retro, the vendor negotiation, the thread where somebody pasted a production connection string. Nobody experiences this as granting access; they experience it as adding a bot to a channel.
 
-One disclosure: Slack's scope reference and the `conversations.history` reference both describe the membership bound, and neither contains a sentence I could find stating explicitly whether messages posted *before* the app joined are returned. I did not verify that boundary against a vendor page. Test it in a throwaway channel with a message posted before the invite, and decide your retention posture from what you observe rather than from this paragraph.
+One boundary Slack's documentation does not settle: whether the app's join time floors that range, so that "the entire history" means everything or only everything since the invite. The reference states the access unit and the default; it does not state that edge. Post a message in a throwaway channel, invite the app afterwards, and read the result before you decide your retention posture.
 
 Two scopes deserve a specific argument before you add them. `users:read.email` turns a Slack user id into a company email address, which is the join key between your Slack logs and every other system you run; add it only if the agent actually needs to correlate identities. And `chat:write.public` lets the app post into channels it is not a member of, which quietly removes the invite as a consent signal — the thing a channel owner did to opt in. If you take `chat:write.public`, you should be able to name the workflow that needs it.
 
@@ -129,7 +129,7 @@ Exchange the code with a POST to `https://slack.com/api/oauth.v2.access` carryin
 
 `access_token` is the bot token. `authed_user.access_token` only exists if you asked for `user_scope`, and if you did not, its absence is the desired outcome, not a bug. Store the top-level `scope` string rather than the list you requested — Slack recommends storing the granted scopes from the response — because what you asked for and what the workspace approved are different facts, and only one of them determines whether your next call returns `missing_scope`.
 
-Slack states that OAuth tokens do not expire until revoked via `auth.revoke`. That is convenient and it is also the risk: an `xoxb-` token in a config file is a standing grant with no clock on it. If you want an expiry, opt into token rotation, which issues access tokens with a documented lifetime of 43,200 seconds (12 hours) plus a refresh token, exchanged with `oauth.v2.access` using `grant_type=refresh_token`. Slack's rotation documentation states plainly that "token rotation may not be turned off once it's turned on", so treat enabling it as a one-way door and test the refresh path before you flip it in production. The rotation docs describe an `xoxe` prefix on the rotated credentials; I have not verified the exact prefix string against a live token, so read it off your own exchange response rather than pattern-matching on a literal from this page.
+Slack states that OAuth tokens do not expire until revoked via `auth.revoke`. That is convenient and it is also the risk: an `xoxb-` token in a config file is a standing grant with no clock on it. If you want an expiry, opt into token rotation, which issues access tokens with a documented lifetime of 43,200 seconds (12 hours) plus a refresh token, exchanged with `oauth.v2.access` using `grant_type=refresh_token`. Slack's rotation documentation states plainly that "token rotation may not be turned off once it's turned on", so treat enabling it as a one-way door and test the refresh path before you flip it in production. The rotation docs show the rotated bot credentials as an access token prefixed `xoxe.xoxb-` paired with a refresh token prefixed `xoxe-1-`, and the user-token equivalent prefixed `xoxe.xoxp-`. Refresh tokens are single-use, so persist the new one from every exchange before you use the access token it arrived with.
 
 ### 4. Verify the signature on every request Slack sends you
 
@@ -139,7 +139,8 @@ Slack signs each request to your request URL. The construction, from Slack's ver
 def is_signature_valid(headers, raw_body: bytes, now: float | None = None) -> bool:
     timestamp = headers.get("X-Slack-Request-Timestamp")
     signature = headers.get("X-Slack-Signature")
-    if not timestamp or not signature:
+    # compare_digest raises TypeError on a str holding a non-ASCII code point.
+    if not timestamp or not signature or not signature.isascii():
         return False
     try:
         sent_at = int(timestamp)
@@ -163,7 +164,7 @@ The Events API delivers to an HTTPS URL you host. Socket Mode delivers over a We
 
 For an agent inside a VPC, that is decisive. There is no inbound path to open, no certificate to rotate on a public hostname, no load balancer whose access log now contains message text, and no signature verification to get wrong, because there is no request URL to forge against. The costs are real too: you own a long-lived connection and its reconnect logic, the app must be running to receive anything at all (a request URL at least queues behind Slack's retries), and Slack states that "apps using Socket Mode are *not* currently allowed in the public Slack Marketplace". If you intend to list the app, that sentence makes the decision for you.
 
-If you take the request URL, the timing contract is strict. Slack requires an HTTP 2xx "within three seconds", retries up to three times — near-immediately, then after one minute, then after five — and marks each retry with `x-slack-retry-num` and `x-slack-retry-reason` headers. An app that fails more than 95% of delivery attempts within 60 minutes has its subscriptions temporarily disabled. An agent that calls a model inline will blow three seconds routinely, so acknowledge first and do the work afterwards, and dedupe on `event_id` because the retries carry the same one. You can suppress retries for a request you know you will never handle by returning `x-slack-no-retry: 1`.
+If you take the request URL, the timing contract is strict. Slack requires an HTTP 2xx "within three seconds", retries up to three times — near-immediately, then after one minute, then after five — and marks each retry with `x-slack-retry-num` and `x-slack-retry-reason` headers. An app that fails more than 95% of delivery attempts within 60 minutes has its subscriptions temporarily disabled. Those numbers are the whole contract, and the failure mode *Slack turns your event subscriptions off* below turns them into a handler design.
 
 ### 6. Read a channel's recent messages
 
@@ -171,7 +172,7 @@ The Web API lives at `https://slack.com/api/METHOD_FAMILY.method`. Slack prefers
 
 Slack meters by method tier rather than one global budget, and each method's reference page names its tier: Tier 1 is "1+ per minute", Tier 2 "20+ per minute", Tier 3 "50+ per minute" for the paginated collection methods, and Tier 4 "100+ per minute". `chat.postMessage` sits in a special tier that Slack describes as generally one message per second per channel "while also maintaining a workspace-wide limit" — Slack does not publish that second number, so do not size a fan-out against a value you found in a blog post. Exceeding a limit returns HTTP 429 with a `Retry-After` header in seconds and the `ratelimited` error code; honour the header as given.
 
-Resolve the channel once with `conversations.list` (Tier 2, 20+ per minute; default `limit` 100, maximum 1000; `types` defaults to `public_channel`), cache the id, then read:
+Resolve the channel once with `conversations.list` (Tier 2, 20+ per minute; `limit` defaults to 100 and Slack documents it as "must be an integer under 1000", so 999 is the ceiling; `types` defaults to `public_channel`), cache the id, then read:
 
 ```python
 def recent_messages(channel_id: str, limit: int = 15) -> list[dict]:
@@ -179,9 +180,9 @@ def recent_messages(channel_id: str, limit: int = 15) -> list[dict]:
     return body.get("messages", [])
 ```
 
-`conversations.history` documents a default `limit` of 100 and a maximum of 999 — but read the rate-limit section below before you rely on either number, because for a large class of apps both collapse to 15. Page with `response_metadata.next_cursor` and stop when it is empty. Pass `oldest` with the timestamp of the last message you processed so a restart does not re-read the backlog; that one argument is also the cheapest way to keep an agent from ingesting years of history it has no business summarising.
+`conversations.history` documents a default `limit` of 100 and a maximum of 999 — but read the failure mode *`conversations.history` returns fifteen messages, once a minute* below before you rely on either number, because for a large class of apps both collapse to 15. Page with `response_metadata.next_cursor` and stop when it is empty. Pass `oldest` with the timestamp of the last message you processed so a restart does not re-read the backlog; that one argument is also the cheapest way to keep an agent from ingesting years of history it has no business summarising.
 
-Two errors here mean different things and get confused constantly. `missing_scope` means the token lacks the permission, and Slack tells you exactly what is missing — the response carries `needed` and `provided` fields, so print them instead of guessing. `not_in_channel` means the token has the scope and the app is not a member. The fix for the second is an invite (`/invite @yourapp`) or a `conversations.join` call, which itself needs `channels:join`.
+Two errors here mean different things and get confused constantly. `missing_scope` means the token lacks the permission, and Slack tells you exactly what is missing — the response carries `needed` and `provided` fields, whose shape Slack shows in the [`search.all` error example](https://docs.slack.dev/reference/methods/search.all/), so print them instead of guessing. `not_in_channel` means the token has the scope and the app is not a member. The fix for the second is an invite (`/invite @yourapp`) or a `conversations.join` call, which itself needs `channels:join`.
 
 ### 7. Post the reply as the bot
 
@@ -190,7 +191,7 @@ Two errors here mean different things and get confused constantly. `missing_scop
 ```python
 body = call(
     "chat.postMessage",
-    {"channel": channel_id, "thread_ts": parent["thread_ts"] or parent["ts"], "text": text},
+    {"channel": channel_id, "thread_ts": parent.get("thread_ts", parent["ts"]), "text": text},
     json_body=True,
 )
 ```
@@ -206,7 +207,7 @@ Who the action is attributed to:
 | Option | When it wins | What it costs | What breaks first |
 | --- | --- | --- | --- |
 | Bot token (`xoxb-`) | Default for every agent. The app is a distinct actor with its own scopes, its own channel memberships, and its own name in the transcript. | The bot must be invited to each conversation it reads, which feels like friction and is actually the consent signal. | Reach. It cannot see a channel nobody added it to — which is the feature, until someone asks it to summarise one. |
-| User token (`xoxp-`) | An action the user explicitly asked to be taken in their own name, or a method Slack exposes only to user tokens. | Slack performs write actions "as if by the user themselves", so attribution is destroyed at the source. The grant follows the person, not the task. | Audit. The transcript names a human for an action software took, and no logging you add downstream can undo that. |
+| User token (`xoxp-`) | An action the user explicitly asked to be taken in their own name, or a method Slack exposes only to user tokens. | Attribution is destroyed at the source, for the reason quoted in The problem, and reach follows the person rather than the task. | Audit. The transcript names a human for an action software took, and no logging you add downstream can undo that. |
 | Brokered access through a control layer | Many workspaces, many users, one agent, and an auditor who will ask which user caused a given message. | A dependency and a policy model to run. | Nothing early. The cost is up front rather than in the incident. |
 
 How events reach the agent:
@@ -240,7 +241,7 @@ How events reach the agent:
 
 **Symptom:** an investigation into a message that leaked something lands on a named employee, who did not send it. Slack's own transcript, the export, and the search results all show their name.
 
-**Cause:** the app was installed with `user_scope` and the agent posts with the `xoxp-` token. Slack's token documentation states that write actions with a user token are "performed as if by the user themselves". There is no field in the message that records "an app did this on behalf of a user" — the identity is simply the user's.
+**Cause:** the app was installed with `user_scope` and the agent posts with the `xoxp-` token, which Slack treats as the user acting — the rule quoted in The problem. There is no field in the message that records "an app did this on behalf of a user"; the identity is simply the user's.
 
 **Fix:** move to a bot token and re-install without `user_scope`. Where a user token is genuinely required, keep your own request log that binds each API call to the agent, the user it acted for, and the reason — because Slack's record will not contain that binding. This is the exact problem [governing delegated identity](/govern/) exists to solve, and it is cheaper to solve before the transcript exists.
 
@@ -264,15 +265,15 @@ How events reach the agent:
 
 **Symptom:** events stop arriving. No deploy, no config change, and the endpoint answers fine when you curl it.
 
-**Cause:** Slack requires an HTTP 2xx within three seconds and retries three times — near-immediately, at one minute, and at five. An app that fails more than 95% of delivery attempts within 60 minutes has its subscriptions temporarily disabled. An agent that runs an inference call inside the request handler exceeds three seconds as a matter of course, so the failure rate is a property of the design, not of a bad day.
+**Cause:** your handler misses the three-second acknowledgement more often than not, and Slack's 95% rule eventually disables the subscription. An agent that runs an inference call inside the request handler exceeds that window as a matter of course, so the failure rate is a property of the design, not of a bad day.
 
-**Fix:** acknowledge with a 2xx immediately, enqueue the payload, and process it out of band. Dedupe on `event_id`, because the retries you already triggered carry the same id and a duplicate reply is worse than a slow one. If a payload is one you will never handle, return `x-slack-no-retry: 1` so Slack stops rather than counting three more failures against you.
+**Fix:** acknowledge with a 2xx immediately, enqueue the payload, and process it out of band. Dedupe on `event_id`, because the retries you already triggered carry the same id and a duplicate reply is worse than a slow one. For a payload you will never handle, return a non-2xx carrying `x-slack-no-retry: 1` so Slack stops rather than counting three more failures against you.
 
 ### `conversations.history` returns fifteen messages, once a minute
 
 **Symptom:** a backfill that worked in development crawls in production, or the agent starts returning partial answers with no error. The method still succeeds; it simply returns 15 messages regardless of the `limit` you pass.
 
-**Cause:** as of 29 May 2025, Slack limits `conversations.history` and `conversations.replies` to 1 request per minute and a maximum of 15 objects per request for apps distributed outside the Marketplace — immediately for new unlisted apps and for new installations of existing unlisted apps. Slack's changelog states that internal customer-built applications are not impacted and retain 50+ requests per minute with 1,000 objects, and a follow-up post repeated that internal customer-built apps "will maintain their existing rate limits". The method reference still documents a default of 100 and a maximum of 999, which is what makes this so confusing to hit: the docs and your responses disagree, and both are right for different apps.
+**Cause:** as of 29 May 2025, Slack limits `conversations.history` and `conversations.replies` to 1 request per minute and a maximum of 15 objects per request for apps commercially distributed outside the Marketplace — immediately for new unlisted apps and for new installations of existing unlisted apps. Slack's changelog states that internal customer-built applications are not impacted and retain 50+ requests per minute with 1,000 objects, and a follow-up post repeated that internal customer-built apps "will maintain their existing rate limits". The method reference still documents a default of 100 and a maximum of 999, which is what makes this so confusing to hit: the docs and your responses disagree, and both are right for different apps.
 
 **Fix:** first, establish which class your app is in — internal customer-built, Marketplace-listed, or distributed outside the Marketplace — because the answer changes your architecture, not just a constant. Then stop backfilling: drive the agent from the Events API or Socket Mode so messages arrive as they happen, and use `conversations.history` only to catch up from an `oldest` watermark. An agent that reads history on a timer is spending its scarcest quota on data it mostly already has.
 
@@ -282,7 +283,7 @@ How events reach the agent:
 
 **Cause:** the install is gone, or the token was revoked. Slack returns `token_revoked` for "a deleted user or workspace or the app has been removed", `account_inactive` for a deleted user or workspace on a bot token, and `token_expired` for an expired rotating token. These are terminal states dressed as ordinary `ok:false` errors, so generic retry logic treats them as transient.
 
-**Fix:** subscribe to `app_uninstalled`, which Slack sends when an app is "completely uninstalled", and to `tokens_revoked`, whose payload carries `tokens.oauth` and `tokens.bot` arrays naming the affected user ids. Neither requires a scope. On any of those signals, or on `token_revoked` / `account_inactive` / `invalid_auth` from an API call, delete the stored token, mark the workspace as needing re-installation, and stop calling. `auth.test` needs no scopes and is the cheapest way to check a stored token's liveness before a batch of work.
+**Fix:** subscribe to `app_uninstalled`, which Slack sends when an app is "completely uninstalled", and to `tokens_revoked`, whose payload carries `tokens.oauth` and `tokens.bot` arrays naming the affected user ids. Neither requires a scope. On any of those signals, or on `token_revoked` / `account_inactive` / `invalid_auth` from an API call, delete the stored token, mark the workspace as needing re-installation, and stop calling. [`auth.test`](https://docs.slack.dev/reference/methods/auth.test/) needs no scopes and is the cheapest way to check a stored token's liveness before a batch of work.
 
 ### The agent reads a channel it was never meant to read
 
@@ -290,7 +291,7 @@ How events reach the agent:
 
 **Cause:** somebody invited the bot to a channel. That is all it takes. Scope was granted once, months ago, by an admin who reviewed a list of scope strings; membership is granted continuously by anyone with an `/invite`. The union of those two grants is the agent's actual reach, and Slack surfaces the first one clearly and the second one not at all.
 
-**Fix:** enumerate membership as a routine, not as an investigation. `users.conversations` defaults to the conversations the calling bot belongs to and needs only `channels:read` (or the matching `groups:read`, `im:read`, `mpim:read` for other types), so it is a cheap scheduled job. Review that list and leave channels the agent has no mandate in. Truncate message text and skip file contents before anything reaches a prompt. The [failure pillar](/fail/) covers how this material escapes once it is in the pipeline — prompt logs, caches, and third-party inference endpoints are all downstream of a decision made by whoever typed the invite.
+**Fix:** enumerate membership as a routine, not as an investigation. [`users.conversations`](https://docs.slack.dev/reference/methods/users.conversations/) defaults to the conversations the calling bot belongs to and needs only `channels:read` (or the matching `groups:read`, `im:read`, `mpim:read` for other types), so it is a cheap scheduled job. Review that list and leave channels the agent has no mandate in. Truncate message text and skip file contents before anything reaches a prompt. The [failure pillar](/fail/) covers how this material escapes once it is in the pipeline — prompt logs, caches, and third-party inference endpoints are all downstream of a decision made by whoever typed the invite.
 
 ## Doing this at scale
 
@@ -334,7 +335,7 @@ Start with the [connect pillar](/connect/) for how this pattern generalises acro
 
 Primary sources for everything asserted above:
 
-- [Token types](https://docs.slack.dev/authentication/tokens/) — the `xoxb-`, `xoxp-`, and `xapp-` prefixes, and the statement that user-token writes are performed as if by the user.
+- [Token types](https://docs.slack.dev/authentication/tokens/) — the `xoxb-`, `xoxp-`, and `xapp-` prefixes, and the user-token attribution rule quoted in The problem.
 - [Permission scopes reference](https://docs.slack.dev/reference/scopes/) — the exact scope strings and Slack's own description of each.
 - [Installing with OAuth](https://docs.slack.dev/authentication/installing-with-oauth/) — the authorize URL, `scope` versus `user_scope`, the `state` check, the `oauth.v2.access` response shape, additive scopes, and `auth.revoke`.
 - [Using token rotation](https://docs.slack.dev/authentication/using-token-rotation/) — the 43,200-second access token lifetime, `oauth.v2.exchange`, `grant_type=refresh_token`, and the one-way switch.
