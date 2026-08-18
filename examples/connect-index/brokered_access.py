@@ -24,8 +24,6 @@ Caveats, both of which the guide states as well:
   "support_mail", "get_emails", or "emails" literals below.
 """
 
-from __future__ import annotations
-
 import asyncio
 import os
 
