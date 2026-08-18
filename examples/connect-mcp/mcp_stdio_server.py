@@ -73,9 +73,12 @@ ENTITLEMENTS: dict[str, dict[str, Any]] = {
 
 # Stand-in for the system of record.
 INVOICES: dict[str, dict[str, Any]] = {
-    "inv_000042": {"account_id": "acct_1001", "total_cents": 4200, "status": "paid"},
-    "inv_000043": {"account_id": "acct_1002", "total_cents": 19900, "status": "paid"},
-    "inv_000044": {"account_id": "acct_9999", "total_cents": 900, "status": "paid"},
+    "inv_000042": {"account_id": "acct_1001", "total_cents": 4200,
+                   "refunded_cents": 0, "status": "paid"},
+    "inv_000043": {"account_id": "acct_1002", "total_cents": 19900,
+                   "refunded_cents": 0, "status": "paid"},
+    "inv_000044": {"account_id": "acct_9999", "total_cents": 900,
+                   "refunded_cents": 0, "status": "paid"},
 }
 
 INVOICE_ID = re.compile(r"^inv_[0-9]{6}$")
@@ -226,10 +229,40 @@ def owned_invoice(caller: str, invoice_id: str) -> dict[str, Any]:
 
 
 def check_tool_allowed(caller: str, tool_name: str) -> None:
+    # Defence in depth: handle_tools_call already rejects an unknown name with a
+    # protocol error, so this branch is unreachable through the dispatcher. It
+    # stays so that no future caller of this function can skip the check.
     if tool_name not in TOOLS_BY_NAME:
         raise Denied(f"unknown tool {tool_name}")
     if not caller or tool_name not in ENTITLEMENTS[caller]["tools"]:
         raise Denied(f"{caller or 'unknown caller'} may not call {tool_name}")
+
+
+def check_arguments_against_schema(tool_name: str, arguments: dict[str, Any]) -> None:
+    """Enforce the tool's own inputSchema before any handler sees the arguments.
+
+    `additionalProperties: false` is a contract, not a mechanism. The client and
+    the model see it; nothing enforces it on the wire. The specification puts the
+    obligation on the server -- "Servers MUST: Validate all tool inputs" -- so an
+    undeclared argument is refused here rather than silently ignored. Ignoring it
+    is the dangerous option: it works right up until someone adds a line that
+    reads the smuggled key.
+
+    This is a deliberately small check covering `properties`, `required`, and
+    `additionalProperties`. A production server should run a real JSON Schema
+    2020-12 validator over the same document instead of hand-rolling this.
+    """
+    schema = TOOLS_BY_NAME[tool_name]["inputSchema"]
+    declared = set(schema.get("properties", {}))
+
+    if schema.get("additionalProperties") is False:
+        undeclared = sorted(set(arguments) - declared)
+        if undeclared:
+            raise Denied(f"{tool_name} does not accept {', '.join(undeclared)}")
+
+    missing = sorted(set(schema.get("required", [])) - set(arguments))
+    if missing:
+        raise Denied(f"{tool_name} requires {', '.join(missing)}")
 
 
 # --------------------------------------------------------------------------
@@ -262,11 +295,28 @@ def tool_refund_invoice(caller: str, arguments: dict[str, Any]) -> dict[str, Any
     ceiling = ENTITLEMENTS[caller]["max_refund_cents"]
     if amount > ceiling:
         raise Denied(f"refund of {amount} exceeds your ceiling of {ceiling}")
-    if amount > invoice["total_cents"]:
-        raise Denied(f"refund of {amount} exceeds the invoice total")
 
-    invoice["status"] = "refunded"
-    return {"invoice_id": invoice_id, "refunded_cents": amount, "reason": reason}
+    # The state check. A per-call bound is not a bound on its own: two identical
+    # calls each pass it, and the model has no memory of the first. Check the
+    # amount against what this invoice has already refunded, not against its
+    # total, or the tool is replayable for the full amount every time.
+    already = invoice["refunded_cents"]
+    remaining = invoice["total_cents"] - already
+    if amount > remaining:
+        raise Denied(f"refund of {amount} exceeds the {remaining} remaining on this invoice")
+
+    invoice["refunded_cents"] = already + amount
+    invoice["status"] = (
+        "refunded"
+        if invoice["refunded_cents"] == invoice["total_cents"]
+        else "partially_refunded"
+    )
+    return {
+        "invoice_id": invoice_id,
+        "refunded_cents": amount,
+        "remaining_cents": invoice["total_cents"] - invoice["refunded_cents"],
+        "reason": reason,
+    }
 
 
 HANDLERS = {
@@ -362,6 +412,7 @@ def handle_tools_call(request_id: Any, caller: str, params: dict[str, Any]) -> d
 
     try:
         check_tool_allowed(caller, name)
+        check_arguments_against_schema(name, arguments)
         payload = HANDLERS[name](caller, arguments)
     except Denied as denied:
         audit(caller, name, arguments, "denied", str(denied))
