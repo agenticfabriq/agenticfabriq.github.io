@@ -257,7 +257,7 @@ Note one detail that survives every organization policy choice. GitHub states th
 
 ## Checklist
 
-- [ ] The agent authenticates with a `ghs_` installation access token, and no `ghp_` or `github_pat_` value appears anywhere in its configuration.
+- [ ] The agent authenticates with a `ghs_` installation access token, and no `ghp_`, `github_pat_`, or `gho_` value appears anywhere in its configuration.
 - [ ] The app is registered as **Only on this account** unless it is genuinely distributed.
 - [ ] The private key is loaded from a vault or an injected secret, never from a file committed to a repository, and the app holds a second key so rotation does not require downtime.
 - [ ] The installation is on select repositories, and a start-up check asserts `repository_selection == "selected"`.
@@ -266,7 +266,7 @@ Note one detail that survives every organization policy choice. GitHub states th
 - [ ] The permission list was derived from `X-Accepted-GitHub-Permissions` headers on real 403s, and the derivation is repeatable in CI.
 - [ ] A ruleset on the default branch requires a pull request with at least one approval, and the agent's app is not in its bypass list.
 - [ ] The agent calls `DELETE /installation/token` in a `finally` block.
-- [ ] Retry logic distinguishes a 403 carrying `X-Accepted-GitHub-Permissions` from a 403 carrying rate-limit headers, and honours `retry-after` when present.
+- [ ] Retry logic classifies a 403 by checking `retry-after`, then `x-ratelimit-remaining`, then the documented error message — and reads `X-Accepted-GitHub-Permissions` only to name the missing permission, never to decide whether the failure is retryable.
 - [ ] You can answer, from your own records, which human's request produced any given commit the app authored.
 
 ## Failure modes
