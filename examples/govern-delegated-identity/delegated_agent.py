@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -29,6 +30,7 @@ from datetime import datetime, timezone
 
 from intersection import Denied, Principal, authorize
 from obo_exchange import (
+    AssertionExpired,
     ClaimsChallenge,
     ConsentRequired,
     DelegationEnded,
@@ -100,7 +102,9 @@ def resolve_identity(inbound_token: str) -> RequestIdentity:
     return RequestIdentity(
         request_id=str(uuid.uuid4()),
         subject=subject,
-        upn=claims.get("preferred_username", "<unknown>"),
+        # `preferred_username` is v2-only; a v1 token carries `upn` instead.
+        # Display only either way — neither is safe for an authorization decision.
+        upn=claims.get("preferred_username") or claims.get("upn") or "<unknown>",
         tenant=claims.get("tid", "<unknown>"),
         consented=frozenset(claims.get("scp", "").split()),
     )
@@ -110,6 +114,17 @@ def route(prompt: str) -> str:
     """Stand-in for the model's tool choice. Deterministic so the demo is."""
     del prompt
     return "search_files"
+
+
+def _www_authenticate_param(header: str, name: str) -> str | None:
+    """Pull one quoted parameter out of a WWW-Authenticate challenge.
+
+    Deliberately small: the value of `claims` is an opaque blob to be relayed,
+    not parsed, so the only job here is to find out whether one is present and
+    hand it back untouched.
+    """
+    match = re.search(rf'\b{re.escape(name)}\s*=\s*"([^"]*)"', header)
+    return match.group(1) if match else None
 
 
 def graph_search(access_token: str, query: str) -> list[dict]:
@@ -127,12 +142,17 @@ def graph_search(access_token: str, query: str) -> list[dict]:
             return json.loads(response.read()).get("value", [])
     except urllib.error.HTTPError as error:
         if error.code == 401:
-            # The resource rejected a token that has not expired. With continuous
-            # access evaluation that is a revocation, not a fluke, and the
-            # WWW-Authenticate header carries the claims challenge to relay.
-            raise DelegationEnded(
-                f"graph 401; www-authenticate: {error.headers.get('WWW-Authenticate')}"
-            ) from error
+            # The resource rejected a token that has not expired. Under continuous
+            # access evaluation that 401 is one of two different things, and the
+            # WWW-Authenticate header is what separates them: a claims challenge
+            # the *client* can satisfy by re-authenticating, or a revocation the
+            # client cannot. Parse it. Raising DelegationEnded for both would
+            # discard a recoverable challenge and log a live grant as revoked.
+            challenge = error.headers.get("WWW-Authenticate") or ""
+            claims = _www_authenticate_param(challenge, "claims")
+            if claims is not None:
+                raise ClaimsChallenge(f"graph 401: {challenge}", claims) from error
+            raise DelegationEnded(f"graph 401; www-authenticate: {challenge}") from error
         if error.code == 403:
             raise ToolRefused(f"graph 403: {error.read()!r}") from error
         raise
@@ -179,6 +199,12 @@ def handle(prompt: str, inbound_token: str) -> list[dict]:
         # not write partial results as though the task finished.
         audit(identity, tool, "revoked", reason=str(ended))
         raise
+    except AssertionExpired as stale:
+        # Recoverable and caller-side. The delegation is intact; the caller sent
+        # a token past its `exp`. Answer 401 asking for a fresh one. Do NOT
+        # delete the stored delegation here — nothing was revoked.
+        audit(identity, tool, "assertion_expired", reason=str(stale))
+        raise
     except ConsentRequired as consent:
         audit(identity, tool, "consent_required", reason=str(consent))
         raise
@@ -210,7 +236,13 @@ def main() -> None:
         try:
             for item in handle(prompt, token):
                 print(f"  {item.get('name')}  {item.get('webUrl')}")
-        except (ToolRefused, DelegationEnded, ConsentRequired, ClaimsChallenge) as stop:
+        except (
+            ToolRefused,
+            DelegationEnded,
+            AssertionExpired,
+            ConsentRequired,
+            ClaimsChallenge,
+        ) as stop:
             print(f"  refused: {stop}")
 
 

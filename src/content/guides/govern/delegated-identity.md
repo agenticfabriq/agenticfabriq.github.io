@@ -25,6 +25,8 @@ howTo:
     text: Compute the effective permission set as the intersection of the two grants, never the union, and refuse the call in your own process when a required permission is missing.
   - name: Read the granted scope instead of assuming it
     text: Compare the scope field of the exchange response against what you requested, and treat a wider result as a hard failure rather than a log line.
+  - name: Route token-endpoint failures on the numeric error code
+    text: Branch on the error_codes array rather than the error string, so a revoked grant, a stale assertion, a missing consent, and a claims challenge each get their own handler.
   - name: Write an audit record naming both principals
     text: Log the agent and the human in the same record, keyed on the immutable oid, so an incident review can answer who the agent was acting for.
   - name: Run the identical prompt as two users
@@ -104,7 +106,7 @@ That asymmetry is the reason application permissions are the wrong default for a
 
 The request arrives with `Authorization: Bearer <token>`. Before that token becomes an identity, three things must be true: the signature verifies against the issuing tenant's keys, the issuer is who you expect, and the audience is **you**.
 
-The audience check is the one people skip. A token minted for some other API is not a token for your agent, and forwarding it downstream unchanged is the confused-deputy bug the MCP authorization specification forbids in as many words: "MCP servers **MUST NOT** accept tokens that were not explicitly issued for the MCP server", and an MCP server calling an upstream API "**MUST NOT** pass through the token it received from the MCP client". Entra enforces the same rule from the other side — an on-behalf-of assertion must carry an `aud` claim matching the client id making the exchange, and an app cannot redeem a token issued for a different app.
+The audience check is the one people skip. A token minted for some other API is not a token for your agent, and forwarding it downstream unchanged is the confused-deputy bug the MCP specification forbids in as many words. Its security best practices document sets the acceptance rule — "MCP servers **MUST NOT** accept any tokens that were not explicitly issued for the MCP server" — and its authorization security considerations set the forwarding rule: an MCP server calling an upstream API "**MUST NOT** pass through the token it received from the MCP client". Entra enforces the same thing from the other side — an on-behalf-of assertion must carry an `aud` claim matching the client id making the exchange, and an app cannot redeem a token issued for a different app.
 
 ```python
 metadata = _discover(tenant)  # /v2.0/.well-known/openid-configuration
@@ -126,6 +128,8 @@ Read the endpoints out of the discovery document rather than hardcoding them. Th
 - `scp` — the space-separated delegated scopes this user consented to for this agent.
 
 Do not authorize on `preferred_username` or `name`. Microsoft's own claims reference says both are mutable and marks them display-only; `sub` is immutable but pairwise per application, so it will not correlate across your own services the way `oid` does.
+
+One hour-saving detail before you debug this at 2am: token version changes both halves of the code above. The issuer in the v2.0 discovery document ends in `/v2.0`, while an app registration emitting v1 tokens issues `https://sts.windows.net/{tid}/`, so the issuer check fails with nothing in the error pointing at why. Set `accessTokenAcceptedVersion` to 2 in the app manifest, or discover against the v1 endpoint. The claim names move with it: `preferred_username` is v2-only and v1 carries `upn` instead, which is why `resolve_identity()` reads both.
 
 ### 3. Exchange the user's token for a downstream token
 
@@ -178,9 +182,9 @@ Two implementation details that decide whether the rule holds in practice.
 
 *Direction one — the user reaches the agent's authority.* Priya the intern has consented to `Files.Read`. She asks for the finance quarterly and the delegated call returns nothing, because Graph applied her entitlements. Under a union, the agent has somewhere else to go: the application permission from the problem section, or a stored service credential, or an admin-built search index. The pattern in the diff is almost always a fallback — `try` the user's token, catch the empty result or the 403, retry with the agent's own. It reads like resilience. It is a union, and it hands every user of the agent the agent's ceiling, reachable by rephrasing a question. Intersection makes the empty result the answer, which is the correct answer.
 
-*Direction two — the agent reaches the human's authority.* Dana in finance has consented to `Mail.ReadWrite`. The agent was never registered for mail at all. A document she asks it to summarise contains an instruction to email a competitor. Under a union the agent's capability ceiling is the most privileged human who ever talks to it, and prompt injection inherits that ceiling. Under intersection the agent has no mail-write permission, so no phrasing of any prompt produces one.
+*Direction two — the agent reaches the human's authority.* This is Dana's case from the problem section, now as set arithmetic. She has consented to `Mail.ReadWrite`; the agent was never registered for mail at all. Under a union the agent's capability ceiling is the most privileged human who ever talks to it. Under intersection the agent has no mail-write permission, so no phrasing of any prompt produces one.
 
-Both come from the same move — treating two grants as additive — and only the intersection resists both. `python3 examples/govern-delegated-identity/intersection.py` prints exactly these cases with no credentials required.
+Both come from the same move — treating two grants as additive — and only the intersection resists both. `python3 examples/govern-delegated-identity/intersection.py` prints exactly these cases with no credentials required. Read what that file models carefully: it is the set arithmetic, not the plumbing. Its broad agent grant stands in for whatever authority the union reaches for — an application permission, a service credential, an admin-built index — because the arithmetic is identical whichever of those it is, and the arithmetic is the part people get wrong.
 
 Two honest caveats on how much the platform does for you. First, a provider that implements delegation properly already refuses part of this: an Entra on-behalf-of exchange for a scope the user never consented to returns `AADSTS65001`, and Graph enforces the user's per-object entitlements regardless of which delegated scope the token carries. The union bug in that environment lives in *your* fallback logic, not in the protocol. Second, do not assume every authorization server is that strict. Keycloak's own documentation says "by default, token exchange can be used to request extra scopes and audiences that are not present in the initial `subject_token`", and points at a `downscope-assertion-grant-enforcer` policy to restrict it to downscoping. Whether yours narrows or widens on exchange is a configuration question with a bad default, and it is worth ten minutes to find out which one you have.
 
@@ -193,7 +197,7 @@ if _bare(granted) - _bare(requested):
     raise ScopeWidened(f"asked for {sorted(requested)}, received {sorted(granted)}")
 ```
 
-Compare bare permission names rather than raw strings. Entra's own on-behalf-of example requests `https://graph.microsoft.com/user.read offline_access` and answers with `"scope": "https://graph.microsoft.com/user.read"` — the resource prefix round-trips and `offline_access` does not come back at all, so a naive string comparison fires on a completely correct response. `_bare()` in `obo_exchange.py` strips the prefix and drops the protocol scopes.
+Compare bare permission names rather than raw strings. Entra's own on-behalf-of example requests `https://graph.microsoft.com/user.read offline_access` and answers with `"scope": "https://graph.microsoft.com/user.read"` — the resource prefix round-trips and `offline_access` does not come back at all, so a naive string comparison fires on a completely correct response. `_bare()` in `obo_exchange.py` strips the prefix, drops the protocol scopes, and case-folds. That last one matters because this check raises rather than logs: the casing of the returned `scope` is not documented, Entra's example happens to be lowercase on both sides, and the request in step 3 asks for `Files.Read`. A comparison that treats `files.read` as a widening halts a request that was answered correctly.
 
 ### 6. Branch on the error code, not the error string
 
@@ -204,10 +208,16 @@ A revoked grant, an expired assertion, a missing consent, and a Conditional Acce
 | `AADSTS50173` | "The provided grant has expired due to it being revoked... The user might have changed or reset their password." | Terminal. Delete the stored delegation, stop the run. |
 | `AADSTS700082` | Refresh token expired due to inactivity. | Terminal. Re-consent required. |
 | `AADSTS65001` | `DelegationDoesNotExist` — "The user or administrator hasn't consented to use the application with ID X." | Send the user through consent. Not retryable. |
-| `AADSTS500133` | "Assertion isn't within its valid time range." | The inbound token expired before you exchanged it. Ask the caller for a fresh one. |
+| `AADSTS500133` | "Assertion isn't within its valid time range." | Recoverable, caller-side. The inbound token was stale by the time you exchanged it. Answer 401 asking for a fresh one, and **do not** delete the stored delegation — nothing was revoked. |
 | `interaction_required` with a `claims` body | Conditional Access wants MFA, a compliant device, or a CAE re-evaluation. | Relay the opaque `claims` value to the client in a 401. The agent cannot satisfy it. |
 
-That last row is a design constraint, not an error case. The agent is not the party that can complete an MFA prompt. Microsoft's guidance is that the middle tier replies 401 with a `WWW-Authenticate` header carrying the challenge, the client re-requests a token presenting it, and clients "shouldn't retry to access the middle-tier service using a cached access token". An agent that swallows this and retries turns a solvable step-up into a silent failure.
+Two rows in that table carry more weight than the others, because both are recoverable and both are easy to mistake for a dead grant.
+
+`AADSTS500133` is the cheap one to get wrong. A stale inbound token is the caller's problem and takes one round trip to fix, but a handler that lumps every `invalid_grant` together will classify it as a revocation — and if you also implemented the offboarding fix below, that handler deletes a delegation nobody revoked and puts the user through full re-consent for presenting a token a few seconds late. `obo_exchange.py` gives it its own `AssertionExpired` exception, deliberately not a subclass of `DelegationEnded`, so no `except` clause can quietly absorb it, and `handle()` audits it as `assertion_expired` rather than `revoked`.
+
+The claims challenge is a design constraint rather than an error case. The agent is not the party that can complete an MFA prompt. Microsoft's guidance is that the middle tier replies 401 with a `WWW-Authenticate` header carrying the challenge, the client re-requests a token presenting it, and clients "shouldn't retry to access the middle-tier service using a cached access token". An agent that swallows this and retries turns a solvable step-up into a silent failure.
+
+The same discipline applies one layer out, at the resource. A 401 from Graph on a token that has not expired is *also* two different things, and the `WWW-Authenticate` header is what separates them: a `claims` parameter means a challenge the client can satisfy, and no `claims` parameter means a revocation it cannot. `graph_search()` parses the header for exactly that and raises `ClaimsChallenge` or `DelegationEnded` accordingly. Treating both as terminal throws away the recoverable half and records a live grant as revoked.
 
 ### 7. Write the audit record with both principals
 
@@ -285,7 +295,7 @@ The narrow case where impersonation is right is worth stating so the warning sta
 - [ ] The effective permission set is computed as an intersection, and the code path that would compute a union does not exist.
 - [ ] Permission sets are expanded under their implication hierarchy before any subset or intersection test.
 - [ ] The exchange response's `scope` is compared against what was requested, and a wider result fails the call.
-- [ ] `invalid_grant` is decomposed by error code into revoked, expired-assertion, and needs-consent, with a different handler for each.
+- [ ] Token-endpoint failures are routed on the numeric `error_codes`, never on the `error` string, into at least revoked, expired-assertion, needs-consent, and claims-challenge, with a different handler for each — and an expired assertion never deletes a delegation.
 - [ ] A Conditional Access claims challenge is relayed to the caller rather than retried.
 - [ ] Every audit record names the agent and the human, keyed on an immutable subject id, and includes the granted scopes.
 - [ ] Nothing in the process holds a downstream credential that is reachable without a request in hand: no module-level client, no global token cache keyed on nothing.
@@ -299,7 +309,7 @@ The narrow case where impersonation is right is worth stating so the warning sta
 
 **Symptom:** no error anywhere. A user gets a correct, well-sourced answer drawn from a document they cannot open in the browser. It usually surfaces when they mention it to someone.
 
-**Cause:** the agent's own grant answered on the user's behalf. Either the effective permission set was a union, or the downstream call used a credential belonging to the agent rather than to the caller. In Entra terms, the tell is a downstream token with no `scp` claim at all: Microsoft's claims reference says `scp` is "only included for user tokens", so its absence means no user was in the picture when the call went out.
+**Cause:** the agent's own grant answered on the user's behalf. Either the effective permission set was a union, or the downstream call used a credential belonging to the agent rather than to the caller. The tell is in your own records, not in the token: log the scopes you requested and the scopes the exchange returned, per request, and look for the calls that carried neither. Read those from your audit line rather than by decoding the Graph token — Microsoft asks you not to validate or read tokens for APIs you do not own, and the `scp` claim you would be looking for is documented as "only included for user tokens" precisely because an app-only call never had a user to describe.
 
 **Fix:** intersect, and fail closed locally before the call. Then check the layer below the API: if the agent queries a vector index or a cache built with an administrative credential, the intersection is broken at the index and no amount of correctness at the API boundary repairs it. Filter retrieval by the caller's entitlements at query time or partition the index per principal. This one is a pattern, not a standard — there is no specification for ACL-aware retrieval, and the honest position is that you have to build it and test it with two users.
 
@@ -321,7 +331,9 @@ The narrow case where impersonation is right is worth stating so the warning sta
 
 **Detection:** two independent mechanisms, because each one alone fails silently. Subscribe to deprovisioning from the identity provider — SCIM (RFC 7644) `DELETE /Users/{id}` for a removal, or a PATCH clearing the `active` attribute that RFC 7643 defines on the core user schema — and treat either as a delete of every delegation you hold for that subject. Then reconcile on a schedule: walk your stored delegations, resolve each subject against the directory, and alert on any that no longer resolve or resolve to an inactive user. The webhook is the fast path; the reconciliation is the one that catches the webhook you missed.
 
-**Fix:** delete the delegation, do not merely mark it. And make revoked-grant errors terminal at the code level — `AADSTS50173` and `AADSTS700082` in Entra, `invalid_grant` generally — so a missed deprovisioning event turns into a stopped agent rather than a retry loop. A retry loop against a revoked grant is the signature of an integration that does not model revocation at all.
+**Fix:** delete the delegation, do not merely mark it. And make revoked-grant errors terminal at the code level — `AADSTS50173` and `AADSTS700082` in Entra — so a missed deprovisioning event turns into a stopped agent rather than a retry loop. A retry loop against a revoked grant is the signature of an integration that does not model revocation at all.
+
+Terminal means *those codes*, not every `invalid_grant`. This is the pairing that does real damage: a handler broad enough to catch everything, plus a fix aggressive enough to delete on catch, turns a caller's stale token into a destroyed delegation and a full re-consent. Delete only on the codes that mean revoked, which is why step 6 routes on the numeric code and gives an expired assertion its own exception.
 
 ### The role change that widens, and nobody alerts on it
 
@@ -351,7 +363,7 @@ The narrow case where impersonation is right is worth stating so the warning sta
 
 **Symptom:** a user consented months ago to an agent that read their calendar. It now files expenses. Nobody lied; each change was small.
 
-**Cause:** OAuth scopes are a consent unit, not an intent unit. A user who agreed to `Files.Read` agreed to a permission, not to a purpose, so every new capability that fits inside the old permission arrives without a prompt. Incremental authorization makes this explicit — Google's `include_granted_scopes=true` returns a token covering the union of everything previously granted — and the mechanism is fine; the drift is what you do with it.
+**Cause:** OAuth scopes are a consent unit, not an intent unit. A user who agreed to `Files.Read` agreed to a permission, not to a purpose, so every new capability that fits inside the old permission arrives without a prompt. [Incremental authorization](https://developers.google.com/identity/protocols/oauth2/web-server#incrementalAuth) makes this explicit — set Google's `include_granted_scopes` to `true` and, if the request is granted, "the new access token will also cover any scopes to which the user previously granted the application access". The mechanism is fine; the drift is what you do with it.
 
 **Fix, and the honest position.** Re-consent when the *capability class* changes, not when the tool count does. A new tool that reads what the user already agreed to let the agent read is not a new grant. A new tool that writes, that sends data to a destination the user did not agree to, or that reaches a resource outside the original consent, is a new grant, and reusing the old consent for it is the drift. Keep a per-agent record of what was consented to and when, and surface it to the user somewhere they can revoke it.
 
@@ -414,7 +426,9 @@ Primary sources for everything asserted above:
 - [Monitor and control actions taken with assumed roles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_control-access_monitor.html) — `sts:SetSourceIdentity`, `aws:SourceIdentity`, persistence across role chaining, and where it lands in CloudTrail.
 - [Using OAuth 2.0 for server to server applications](https://developers.google.com/identity/protocols/oauth2/service-account) — domain-wide delegation, the `sub` field, and the two constraints on a service account's reach.
 - [Search for files — Microsoft Graph](https://learn.microsoft.com/en-us/graph/api/driveitem-search) — the `/me/drive/search(q='...')` form and its delegated versus application permissions.
-- [MCP authorization specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) — audience validation, the prohibition on token passthrough, and the confused deputy problem.
+- [MCP security best practices](https://modelcontextprotocol.io/specification/2026-07-28/basic/security_best_practices) — the token passthrough anti-pattern and the rule that a server must not accept any token not explicitly issued for it.
+- [MCP authorization security considerations](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations) — token audience binding and validation, and the prohibition on passing a client's token through to an upstream API.
+- [Using OAuth 2.0 for web server applications — incremental authorization](https://developers.google.com/identity/protocols/oauth2/web-server#incrementalAuth) — `include_granted_scopes` and what the resulting access token covers.
 - [RFC 7662 OAuth 2.0 Token Introspection](https://www.rfc-editor.org/rfc/rfc7662.html) — the `active` response member and the caching constraint.
 - [OpenID Continuous Access Evaluation Profile 1.0](https://openid.net/specs/openid-caep-1_0-final.html) — the `session-revoked` and `token-claims-change` event type URIs.
 - [Keycloak token exchange](https://www.keycloak.org/securing-apps/token-exchange) — standard token exchange parameters and the default that permits requesting extra scopes.
