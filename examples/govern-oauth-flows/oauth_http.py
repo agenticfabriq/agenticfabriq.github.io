@@ -38,13 +38,17 @@ class OAuthError(RuntimeError):
 def basic_auth_header(client_id: str, client_secret: str) -> str:
     """Build the Authorization header for RFC 6749 section 2.3.1 client auth.
 
-    RFC 6749 requires the client id and secret to be form-urlencoded before
-    they are joined and base64-encoded. Most ids and secrets survive that
-    step unchanged, which is exactly why the bug is hard to find when one
-    does not.
+    RFC 6749 section 2.3.1 requires the client id and secret to be encoded
+    with the `application/x-www-form-urlencoded` algorithm of Appendix B
+    before they are joined and base64-encoded. That algorithm is not generic
+    percent-encoding: Appendix B encodes U+0020 as `+`, so `quote_plus` is
+    correct here and `quote` is not. Most ids and secrets survive either
+    spelling unchanged, which is exactly why the bug is hard to find when one
+    does not -- a secret with a space in it authenticates fine against a
+    lenient server and returns invalid_client against a strict one.
     """
-    user = urllib.parse.quote(client_id, safe="")
-    password = urllib.parse.quote(client_secret, safe="")
+    user = urllib.parse.quote_plus(client_id)
+    password = urllib.parse.quote_plus(client_secret)
     raw = f"{user}:{password}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
