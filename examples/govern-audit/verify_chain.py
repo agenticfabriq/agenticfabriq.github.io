@@ -1,28 +1,48 @@
-"""Verify the hash chain over an exported run of audit records.
+"""Verify the hash chain over an export of audit records.
 
+    python3 emit_record.py > records.jsonl        # straight from the emitter
     python3 verify_chain.py records.jsonl
 
-Reads newline-delimited JSON records as produced by emit_record.py and checks
-two things per record:
+    psql -t -A -v chain="'chain:emitter-1'" \
+         -f export.sql > records.jsonl            # or out of the store
+    python3 verify_chain.py records.jsonl
 
-  * record_hash is the SHA-256 of every other field, so no field was edited;
-  * prev_hash equals the previous record's record_hash, so no record in the
-    middle was removed or reordered.
+Both inputs work because both carry `canonical_form`: the exact byte string the
+emitter hashed. This verifier never re-derives that string from the record's
+fields, and that is the whole design. Re-deriving it is the obvious approach and
+it fails against a database -- PostgreSQL renders `timestamptz` with trailing
+zeros stripped, so a record emitted at ...:41.979180+00:00 reads back as
+...:41.97918+00:00 and rehashes differently. That produces a tamper alert on
+roughly one record in ten, and an integrity control that cries wolf is worse
+than none.
 
-Read the limits before you rely on this. A self-contained chain detects edits
-and internal deletions. It does NOT detect:
+Four checks per record:
 
-  * truncation of the tail -- lopping off the last N records leaves a chain
-    that still verifies perfectly;
-  * wholesale rewriting -- an attacker with the ability to modify records can
-    recompute every hash from the edit forward.
+  * record_hash is the SHA-256 of canonical_form -- no field was edited;
+  * prev_hash equals the previous record's record_hash -- nothing was removed
+    from the middle or reordered;
+  * chain_seq increments by one -- the same, stated independently of any clock;
+  * the queryable columns still agree with canonical_form -- so editing a column
+    an investigator reads, while leaving the hashed bytes alone, is caught.
 
-Both holes close the same way: publish something outside the store's control
-that pins the chain at a point in time. Write the head hash to a system with
-different credentials on a fixed cadence, and record the count it covers. Then
-a truncation is a head hash you cannot reproduce, not a silence. That is the
-same construction certificate transparency logs use, where a signed tree head
-is gossiped so that no single operator can quietly rewrite history.
+Read the limits before you rely on this. It does NOT detect:
+
+  * truncation of the tail -- lopping off the last N records leaves a chain that
+    verifies perfectly;
+  * forgery by whoever holds the append privilege -- a well-formed record
+    chained to the genuine head verifies, because appending is exactly what that
+    role is allowed to do;
+  * wholesale rewriting by someone who can modify records and recompute every
+    hash from the edit forward.
+
+The first and third close the same way: publish the head hash and the record
+count it covers, on a fixed cadence, to a system under different credentials.
+Then a truncation is a head hash you cannot reproduce, not a silence. That is
+the construction certificate transparency uses, where a signed tree head is
+gossiped so no single operator can quietly rewrite history.
+
+The second does not close with cryptography at all. It closes by the emitter not
+being the component under audit.
 """
 
 from __future__ import annotations
@@ -32,51 +52,92 @@ import json
 import sys
 from typing import Any, Iterator
 
+# Fields cross-checked between the queryable columns and the hashed bytes.
+# Deliberately all strings and integers: types that survive a round trip
+# unchanged. Timestamps are excluded because they do not, which is the bug this
+# whole file is shaped around.
+CROSS_CHECKED = (
+    "record_id",
+    "agent_id",
+    "principal_id",
+    "resource",
+    "action",
+    "decision",
+    "outcome",
+    "chain_id",
+    "chain_seq",
+)
 
-def canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
 
-
-def read_records(path: str) -> Iterator[dict[str, Any]]:
+def read_lines(path: str) -> Iterator[tuple[int, dict[str, Any]]]:
     with open(path, encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                yield line_number, json.loads(line)
             except json.JSONDecodeError as error:
                 raise SystemExit(f"{path}:{line_number}: not valid JSON: {error}") from error
 
 
 def verify(path: str) -> list[str]:
     problems: list[str] = []
-    expected_prev: str | None = None
+    # One head per chain. Records from several emitters may share a file, and
+    # each chain advances on its own.
+    heads: dict[str, tuple[str | None, int]] = {}
     count = 0
 
-    for record in read_records(path):
+    for line_number, line in read_lines(path):
         count += 1
-        record_id = record.get("record_id", f"<record {count}>")
+        canonical_form = line.get("canonical_form")
+        record_hash = line.get("record_hash")
 
-        body = {key: value for key, value in record.items() if key != "record_hash"}
-        computed = hashlib.sha256(canonical_json(body)).hexdigest()
-        if computed != record.get("record_hash"):
-            problems.append(f"{record_id}: record_hash does not cover its own fields")
-
-        if record.get("prev_hash") != expected_prev:
+        if not isinstance(canonical_form, str) or not isinstance(record_hash, str):
             problems.append(
-                f"{record_id}: prev_hash {record.get('prev_hash')!r} "
-                f"does not match the previous record_hash {expected_prev!r} "
+                f"line {line_number}: no canonical_form/record_hash pair. "
+                "Export with export.sql rather than reconstructing the record "
+                "from typed columns."
+            )
+            continue
+
+        body = json.loads(canonical_form)
+        record_id = body.get("record_id", f"<line {line_number}>")
+
+        computed = hashlib.sha256(canonical_form.encode("utf-8")).hexdigest()
+        if computed != record_hash:
+            problems.append(f"{record_id}: record_hash does not cover canonical_form")
+
+        chain_id = body.get("chain_id")
+        expected_prev, expected_seq = heads.get(chain_id, (None, 1))
+
+        if body.get("prev_hash") != expected_prev:
+            problems.append(
+                f"{record_id}: prev_hash {body.get('prev_hash')!r} does not match "
+                f"the previous record_hash {expected_prev!r} in chain {chain_id!r} "
                 "-- a record was removed, reordered, or inserted"
             )
+        if body.get("chain_seq") != expected_seq:
+            problems.append(
+                f"{record_id}: chain_seq {body.get('chain_seq')!r} breaks the "
+                f"sequence in chain {chain_id!r}, expected {expected_seq}"
+            )
 
-        # Chain from the hash the record actually carries, not the one it should
-        # have carried. Otherwise a single break cascades into a failure on
-        # every record after it and the report says nothing about where it
+        # Cross-check the queryable columns against the hashed bytes.
+        columns = line.get("columns", line)
+        for field in CROSS_CHECKED:
+            if field in columns and columns[field] != body.get(field):
+                problems.append(
+                    f"{record_id}: column {field}={columns[field]!r} disagrees with "
+                    f"canonical_form {body.get(field)!r} -- the queryable copy was "
+                    "edited while the hashed bytes were left alone"
+                )
+
+        # Chain from the values the record actually carries, not the ones it
+        # should have carried. Otherwise a single break cascades into a failure
+        # on every later record and the report says nothing about where it
         # started.
-        expected_prev = record.get("record_hash")
+        heads[chain_id] = (record_hash, body.get("chain_seq", expected_seq) + 1)
 
     if count == 0:
         problems.append(f"{path}: no records")
@@ -92,8 +153,13 @@ def main() -> None:
         for problem in problems:
             print(problem, file=sys.stderr)
         raise SystemExit(1)
-    print("chain intact (this proves no edit or internal deletion, not that "
-          "the tail is complete -- compare the head hash against your anchor)")
+    print(
+        "chain intact -- no edit, no internal deletion, columns agree with the "
+        "hashed bytes. This does NOT prove the tail is complete or that every "
+        "record describes something that happened: compare the head hash "
+        "against your external anchor, and remember that whoever may append "
+        "may also append a lie."
+    )
 
 
 if __name__ == "__main__":

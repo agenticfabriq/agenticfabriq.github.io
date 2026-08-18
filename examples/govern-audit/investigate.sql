@@ -1,17 +1,27 @@
 -- The investigation. Executed against PostgreSQL 17 with schema.sql loaded.
 --
--- Run as the read-only auditor role:
---   psql -U auditor -d auditdb \
+-- Run with the read-only auditor privileges, as a named human:
+--   psql -U alice -d auditdb \
 --     -v agent="'agent:billing-triage@v7'" \
 --     -v principal="'user:ada@example.com'" \
 --     -v from="'2026-08-18T00:00:00Z'" \
 --     -v to="'2026-08-19T00:00:00Z'" \
 --     -f investigate.sql
 --
+-- Note `-U alice`, not `-U auditor`. roles.sql creates `auditor` NOLOGIN on
+-- purpose: it is a privilege set, not a shared account, and `psql -U auditor`
+-- fails with "role auditor is not permitted to log in". Grant membership once
+-- (GRANT auditor TO alice) and adopt it with the SET ROLE below, so the
+-- connection stays attributable to a person while the privileges live in one
+-- place. Reads of an audit store are themselves audit events; you cannot log
+-- who read what if everyone shares one login.
+--
 -- Query 1 is the one that gets run at 2am. Queries 2 and 3 are what you run
 -- next, and they are here because an audit trail nobody can query is a backup.
 
 \pset null '-'
+
+SET ROLE auditor;
 
 -- 1. Everything agent X did for user Y in this window.
 --    Matches agent_action_agent_principal_time: two equality columns, then the
