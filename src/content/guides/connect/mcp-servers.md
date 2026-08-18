@@ -20,9 +20,9 @@ howTo:
   - name: Establish the calling identity outside the model's reach
     text: Derive the caller from a validated access token on HTTP or from the host-controlled process environment on stdio, never from a tool argument.
   - name: Declare each tool with a schema that closes doors
-    text: Give every tool an inputSchema with additionalProperties false, closed enums, bounded integers, and patterns, so an argument the tool never intended is rejected before any code runs.
+    text: Give every tool an inputSchema with additionalProperties false, closed enums, bounded integers, and patterns, so the set of arguments the tool accepts is written down and reviewable.
   - name: Authorize per tool, per caller, and per argument
-    text: Check that this caller may call this tool, then resolve every identifier against the caller's own entitlements rather than trusting the identifier the model supplied.
+    text: Check that this caller may call this tool, enforce the declared schema so undeclared arguments are refused, resolve every identifier against the caller's own entitlements, and bound the action by what has already happened.
   - name: Refuse the argument classes a model must never supply
     text: Reject a target host, a raw query, a path outside a bounded directory, a credential, and any flag that disables a check, and expose a named allow-listed choice instead.
   - name: Return denials as tool execution errors and log every call
@@ -38,7 +38,7 @@ faq:
     answer: Only as safe as the process the host launches. A stdio server is a subprocess of the host and inherits its environment, file access, and network access, so any secret in the host's environment is readable by the server and by anything the server executes.
   - question: What is the confused deputy problem in an MCP server?
     answer: The server holds a powerful credential, the model chooses the arguments, and the model's input can come from a document an attacker wrote. The server then acts with its own authority on an attacker's instruction. The mitigation is to resolve every target against the caller's entitlements instead of accepting it as an argument.
-  - question: Can an MCP server trust the tool descriptions and annotations it receives?
+  - question: Can an MCP client trust a server's tool descriptions and annotations?
     answer: A client cannot. The MCP specification states that clients must consider tool annotations untrusted unless they come from a trusted server, and the schema notes that all annotation properties are hints that may not describe the tool faithfully.
   - question: Which MCP specification revision is current?
     answer: The current revision is 2026-07-28. It removed the initialize handshake, protocol-level sessions, and the Mcp-Session-Id header, and made every request carry its own protocol version and client capabilities in the _meta field.
@@ -55,7 +55,7 @@ cornerstone: false
 
 ## Who this is for
 
-You are writing an MCP server that fronts something real — a billing system, a data warehouse, a filesystem, an internal API — and it will be called by a model whose context contains text you did not write. This guide is about the boundary between the protocol and your authorization logic, which is where MCP servers actually fail. Skip it if you are only consuming somebody else's MCP server; the parts that concern you are the transport section and the last failure mode, and the rest assumes you own the server side.
+You are writing an MCP server that fronts something real — a billing system, a data warehouse, a filesystem, an internal API — and it will be called by a model whose context contains text you did not write. This guide is about the boundary between the protocol and your authorization logic, which is where MCP servers actually fail. Skip it if you are only consuming somebody else's MCP server; the parts that concern you are step 1 on transports, the caution on tool descriptions in step 3, and the failure mode *Every request is rejected as invalid params, from a client that used to work*. The rest assumes you own the server side.
 
 ## The problem
 
@@ -71,9 +71,13 @@ The second problem in this subject is not security, it is currency. MCP moves fa
 
 ## Step by step
 
+First, what you are actually securing. The [Model Context Protocol](https://modelcontextprotocol.io/specification/2026-07-28) is JSON-RPC 2.0 over a transport, between three named parties: a **host**, which is the LLM application that initiates connections; a **client**, which is a connector inside that host; and a **server**, which provides context and capabilities. A server offers up to three kinds of thing. **Resources** are context and data, for the user or the model to read. **Prompts** are templated messages and workflows, intended for the user to invoke. **Tools** are functions the model executes. Clients may offer features back — in the current revision, elicitation.
+
+That division is the whole security picture in miniature. Tools are described as model-controlled: the model discovers and invokes them on its own judgement, which is why the rest of this guide is about tools and why resources and prompts get one sentence each. If your server exposes resources, apply the same argument discipline to `resources/read` URIs that step 5 applies to tool arguments — a URI is a target like any other.
+
 Everything below is written against **specification revision 2026-07-28**, which the [versioning page](https://modelcontextprotocol.io/specification/versioning) lists as current, and which the schema declares as `LATEST_PROTOCOL_VERSION`. Revisions are date strings marking the last backwards-incompatible change, so when you read a claim about MCP, the first question is which of these it was true of.
 
-The full runnable server is `examples/connect-mcp/mcp_stdio_server.py`, and `examples/connect-mcp/stdio_client_demo.py` drives it end to end, including the denied call. Both are dependency-free: the wire format is newline-delimited JSON-RPC 2.0, so the standard library is enough, and writing it by hand keeps every field visible.
+The full runnable server is `examples/connect-mcp/mcp_stdio_server.py`, and `examples/connect-mcp/stdio_client_demo.py` drives it end to end, including four denials: a tool the caller may not use, another tenant's record, a replayed refund, and a call carrying arguments the tool never declared. Both are dependency-free: the wire format is newline-delimited JSON-RPC 2.0, so the standard library is enough, and writing it by hand keeps every field visible.
 
 ### 1. Choose the transport, knowing what each one inherits
 
@@ -97,7 +101,7 @@ The current revision also mirrors selected body fields into headers, and calls t
 
 ### 2. Establish the calling identity outside the model's reach
 
-Here is the part people get wrong. Authorization in MCP is **OPTIONAL**, and the framework the specification does define — OAuth 2.1, with the MCP server acting as an OAuth 2.1 resource server — applies to HTTP-based transports. Implementations using stdio **SHOULD NOT** follow it, and retrieve credentials from the environment instead. Even where you do implement it, what it gives you is an authenticated caller. It does not give you an entitlement. The protocol carries a call; deciding whether this caller may run this tool with these arguments is code you write.
+Here is the part people get wrong. Authorization in MCP is **OPTIONAL**, and the framework the specification does define — OAuth 2.1, with the MCP server acting as an OAuth 2.1 resource server — applies to HTTP-based transports. Implementations using stdio **SHOULD NOT** follow it, and retrieve credentials from the environment instead. Even where you do implement it, what it gives you is an authenticated caller. It does not give you an entitlement. The protocol carries a call; deciding whether this caller may run this tool with these arguments is code you write. The specification says so twice over: servers **MUST** implement proper access controls, and its scope-minimization guidance lists *"treating claimed scopes in token as sufficient without server-side authorization logic"* as a common mistake.
 
 On HTTP, the mechanics are worth getting exactly right because the failure is silent. Your server **MUST** implement OAuth 2.0 Protected Resource Metadata ([RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)) so clients can discover its authorization server, and clients **MUST** implement Resource Indicators ([RFC 8707](https://www.rfc-editor.org/rfc/rfc8707.html)), sending a `resource` parameter naming your server's canonical URI on both the authorization request and the token request. On the receiving side the rule is one sentence with a lot of weight: MCP servers **MUST** validate that access tokens were issued specifically for them as the intended audience, **MUST** only accept tokens valid for their own resources, and **MUST NOT** accept or transit any other tokens. Accepting a token minted for a different service, and then forwarding it downstream, is the anti-pattern the specification names *token passthrough* and forbids outright.
 
@@ -124,7 +128,7 @@ The property that matters is not where the string comes from. It is that the str
 
 A tool definition carries `name`, an optional `title`, a `description`, an `inputSchema`, an optional `outputSchema`, and optional `annotations`. The `inputSchema` **MUST** be a valid JSON Schema object, defaulting to the 2020-12 dialect when no `$schema` is present. For a tool with no parameters, the specification recommends `{ "type": "object", "additionalProperties": false }` precisely because the looser `{ "type": "object" }` accepts anything.
 
-Take that recommendation everywhere, not just for parameterless tools. The schema is your first filter, and a closed schema rejects arguments the tool never contemplated before a line of your code runs:
+Take that recommendation everywhere, not just for parameterless tools. A closed schema is the contract that says which arguments exist — and it is only a contract. Nothing on the wire enforces it; the client and the model read it, and a request carrying an extra key still arrives. Enforcing it is the server's job, which the specification states directly: *Servers **MUST**: Validate all tool inputs.* Write the schema first, then enforce it in step 4:
 
 ```python
 {
@@ -165,16 +169,31 @@ Second, the `description` is an attack surface pointing the other way. Descripti
 
 ### 4. Authorize per tool, per caller, and per argument
 
-One credential for the whole server is the design flaw that turns a small tool into a large incident. If `lookup_invoice` and `refund_invoice` both run under the same billing API key, then the read tool's blast radius is the refund tool's blast radius: anything that can reach one can reach the other, because there is no boundary between them beyond the name the model happened to call. The blast radius of an MCP server is the union of everything its credentials can do, and per-tool credentials are how you stop that union from being one thing.
+A single entitlement covering the whole server is the design flaw that turns a small tool into a large incident. If `lookup_invoice` and `refund_invoice` are gated by nothing more specific than "this caller may use this server", then the read tool's reach is the refund tool's reach: anything that can call one can call the other, because there is no boundary between them beyond the name the model happened to pick. Per-tool checks are how you stop that union from being one thing. (The same argument applies one level down, to the credentials each tool uses against its upstream; that is a lifecycle problem, and it is in *Doing this at scale*.)
 
-The check has three layers, and each catches a different mistake:
+The check has four layers, and each catches a different mistake:
 
 ```python
 def check_tool_allowed(caller: str, tool_name: str) -> None:
-    if tool_name not in TOOLS_BY_NAME:
-        raise Denied(f"unknown tool {tool_name}")
+    if tool_name not in TOOLS_BY_NAME:  # unreachable via the dispatcher; kept so
+        raise Denied(f"unknown tool {tool_name}")  # no future caller can skip it
     if not caller or tool_name not in ENTITLEMENTS[caller]["tools"]:
         raise Denied(f"{caller or 'unknown caller'} may not call {tool_name}")
+
+
+def check_arguments_against_schema(tool_name: str, arguments: dict) -> None:
+    """Enforce the tool's own inputSchema before any handler sees the arguments."""
+    schema = TOOLS_BY_NAME[tool_name]["inputSchema"]
+    declared = set(schema.get("properties", {}))
+
+    if schema.get("additionalProperties") is False:
+        undeclared = sorted(set(arguments) - declared)
+        if undeclared:
+            raise Denied(f"{tool_name} does not accept {', '.join(undeclared)}")
+
+    missing = sorted(set(schema.get("required", [])) - set(arguments))
+    if missing:
+        raise Denied(f"{tool_name} requires {', '.join(missing)}")
 
 
 def owned_invoice(caller: str, invoice_id: str) -> dict:
@@ -186,13 +205,30 @@ def owned_invoice(caller: str, invoice_id: str) -> dict:
     return invoice
 ```
 
-First, may this caller call this tool at all. Second, does the object named actually belong to this caller — note that an invoice outside the boundary is reported as *not found*, not as *forbidden*, so a denial cannot be used to probe for the existence of another tenant's records. Third, the value ceiling: `max_refund_cents` lives in the entitlement table, not in the schema, because the schema is one document shown to every caller while the ceiling differs per caller. The schema's `maximum` is a hint that helps the model propose a sane number; the entitlement is what actually stops it.
+First, may this caller call this tool at all. Second, does every argument appear in the tool's declared schema — an undeclared key is refused, not ignored, because ignoring it is safe exactly until someone adds a line that reads it. Run the demo and you will see `account_id` and `force` both bounced by this check: the first is the argument *The problem* says must not exist, the second is from step 5's forbidden list. (The version here covers `properties`, `required`, and `additionalProperties`; a production server should hand the same document to a real JSON Schema 2020-12 validator rather than hand-rolling it.)
+
+Third, does the object named actually belong to this caller — note that an invoice outside the boundary is reported as *not found*, not as *forbidden*, so a denial cannot be used to probe for the existence of another tenant's records. Fourth, the value ceilings, of which there are two and they are not the same check:
+
+```python
+    ceiling = ENTITLEMENTS[caller]["max_refund_cents"]
+    if amount > ceiling:
+        raise Denied(f"refund of {amount} exceeds your ceiling of {ceiling}")
+
+    already = invoice["refunded_cents"]
+    remaining = invoice["total_cents"] - already
+    if amount > remaining:
+        raise Denied(f"refund of {amount} exceeds the {remaining} remaining on this invoice")
+```
+
+`max_refund_cents` lives in the entitlement table rather than the schema, because the schema is one document shown to every caller while the ceiling differs per caller. The schema's `maximum` is a hint that helps the model propose a sane number; the entitlement is what stops it.
+
+The second is the one that gets left out, and it is the more dangerous omission. A per-call bound is not a bound: two identical calls each satisfy it independently, and the model has no memory of the first — nor, since 2026-07-28, does the connection. Checking the amount against the invoice *total* lets the tool be replayed for the full value on every call; checking it against what has already been refunded does not. Any tool that moves money, sends mail, or provisions access needs this state check, and the specification's own advice on cross-call state applies: mint the handle, key it server-side, and never infer it from the transport.
 
 Apply the same filter to discovery. `tools/list` results **MAY** vary by the authorization presented on the request, which means a caller who cannot refund should not be shown a refund tool — both because it removes a temptation from the model's context and because it removes a name from an attacker's reconnaissance. The corollary bites if you skip it: because the list is now caller-specific, its `cacheScope` has to be `"private"` rather than `"public"`, or a shared gateway may serve one tenant's tool list to another.
 
 ### 5. Refuse the argument classes a model must never supply
 
-This is the most useful list in the guide. Five kinds of value must never arrive from the model, whatever your framework makes convenient, because each one hands the model a decision your server was supposed to make.
+Five kinds of value must never arrive from the model, whatever your framework makes convenient, because each one hands the model a decision your server was supposed to make.
 
 - **A target host, base URL, or connection string.** The moment a tool takes `url`, `endpoint`, `host`, or `dsn`, your server is a general-purpose HTTP client with your network position, and the first thing an injected instruction reaches for is `http://169.254.169.254/`, the AWS, GCP, and Azure instance metadata service. The specification's SSRF guidance — written for clients fetching OAuth metadata URLs, but the address list is the same one a tool argument reaches — names that endpoint as a route to cloud credentials, along with private ranges `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, loopback `127.0.0.0/8`, and link-local `169.254.0.0/16`, and it warns against hand-rolling the IP check because encoding tricks defeat naive parsers. Expose a named upstream — `service: "billing" | "shipping"` — and resolve the URL server-side.
 - **A raw query, command, or expression.** `run_sql(query)`, `shell(command)`, and `jq(filter)` are the same tool wearing different hats: they delegate the semantics of the operation to the model. Parameterise instead. If a genuine ad-hoc query capability is the product, it belongs behind a read-only role, a statement allow-list, a row cap, and a timeout — and it should still be a separate tool with its own entitlement, so that granting search does not grant it.
@@ -291,6 +327,8 @@ Do not read the table as three points on a security scale. A stdio server that r
 - [ ] No tool argument is a credential, token, key, or password, and no parameter carrying sensitive data is marked with `x-mcp-header`.
 - [ ] No tool argument disables a check — grep the schemas for `force`, `skip`, `override`, `admin`, and `confirm`.
 - [ ] Every `inputSchema` sets `additionalProperties: false`, and every free-text field that could be an enum is one.
+- [ ] The server enforces its own schemas: send a tool an argument it does not declare and confirm the call is refused, not silently accepted.
+- [ ] Every tool that moves money, sends messages, or grants access is bounded by what has already happened, not only by what this call asks for — send the identical call twice and confirm the second is refused.
 - [ ] The calling identity is derived from a validated token or the host-controlled environment, and an unknown identity yields zero tools rather than a default set.
 - [ ] `tools/list` is filtered by the caller's entitlements, and its `cacheScope` is `"private"` because of it.
 - [ ] Access tokens are validated for audience, and a token issued for another resource is rejected rather than forwarded.
@@ -381,7 +419,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The runnable version is `examples/connect-mcp/af_broker_tools.py`. Agentic Fabriq also exposes an MCP connection of its own, so an MCP-speaking host can reach brokered tools through the layer rather than through one server per system — which is the same argument as above from the other end, since it puts the entitlement check in front of every tool instead of inside each one. Connection names, method names, and response shapes are all per-deployment, so run `afctl tools list` against your own gateway rather than copying `billing` or `lookup_invoice` on faith.
+The runnable version is `examples/connect-mcp/af_broker_tools.py`. Agentic Fabriq also exposes an MCP connection of its own, so an MCP-speaking host can reach brokered tools through the layer rather than through one server per system — check what your own deployment exposes, since gateway surface varies. Where it is available, it is the same argument as above from the other end: the entitlement check sits in front of every tool instead of being reimplemented inside each one. Connection names, method names, and response shapes are all per-deployment, so run `afctl tools list` against your own gateway rather than copying `billing` or `lookup_invoice` on faith.
 
 Two things stay true whether or not you adopt a layer, and they are the ones worth keeping. The blast radius of a compromised agent is the union of what its credentials can do, so brokering earns its keep by shrinking that union to a revocable gateway token. And the argument design in step 5 is not delegable: no layer can know that `account_id` should not have been a parameter. What [Agentic Fabriq](https://agenticfabriq.com) removes is the credential lifecycle and the policy duplication; the schema is still yours to close.
 
@@ -398,7 +436,7 @@ Primary sources for everything asserted above, all read at revision 2026-07-28:
 - [stdio transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio) — newline framing, the `stdout` and `stderr` rules, shutdown, and the backward-compatibility probe.
 - [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http) — the single POST endpoint, `Origin` validation, the required `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers, and what earlier revisions did differently.
 - [Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization) — OAuth 2.1 as a resource server, RFC 9728 discovery, RFC 8707 resource indicators, audience validation, and the insufficient-scope challenge.
-- [Security best practices](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices) — confused deputy, token passthrough, SSRF and the address ranges to block, state handle hijacking, and local server compromise.
+- [Security best practices](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices) — token passthrough, SSRF and the address ranges to block, state handle hijacking, scope minimization, and local server compromise. Its confused-deputy section covers the OAuth-proxy variant — a static client id plus a consent cookie letting an attacker skip consent — rather than the argument-injection variant this guide opens with; both are the same class, and the second is not in the specification.
 - [Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools) — the tool object, `inputSchema` rules, `x-mcp-header` and its warning, the two error channels, and the human-in-the-loop guidance.
 - [Roots](https://modelcontextprotocol.io/specification/2026-07-28/client/roots) — that roots are informational, are not enforced by the protocol, and are deprecated as of this revision.
 - [Schema `schema.ts`](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts) — `LATEST_PROTOCOL_VERSION`, the `ToolAnnotations` fields and their defaults, and the note that they are hints.

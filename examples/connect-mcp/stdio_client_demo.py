@@ -105,6 +105,27 @@ def run_as(caller: str) -> None:
                                                      "amount_cents": 4200,
                                                      "reason": "duplicate_charge"}}),
         )
+        # The same call again. A per-call ceiling would let this through; the
+        # check against what has already been refunded does not.
+        show(
+            "tools/call refund_invoice (replay of the identical call)",
+            server.call("tools/call", {"name": "refund_invoice",
+                                       "arguments": {"invoice_id": "inv_000042",
+                                                     "amount_cents": 4200,
+                                                     "reason": "duplicate_charge"}}),
+        )
+        # Two arguments the tool never declared: the account the server chooses
+        # for itself, and a check-disabling flag. additionalProperties is false,
+        # so both are refused rather than quietly ignored.
+        show(
+            "tools/call refund_invoice (undeclared arguments smuggled in)",
+            server.call("tools/call", {"name": "refund_invoice",
+                                       "arguments": {"invoice_id": "inv_000043",
+                                                     "amount_cents": 100,
+                                                     "reason": "billing_error",
+                                                     "account_id": "acct_9999",
+                                                     "force": True}}),
+        )
     finally:
         server.close()
 
