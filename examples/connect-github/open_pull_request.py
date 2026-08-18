@@ -3,6 +3,10 @@
 The agent never pushes to the default branch. It creates its own branch, commits
 one file, and opens a pull request, so a human review is the gate on every change.
 
+Run this from inside `examples/connect-github/`: it imports its sibling
+`mint_installation_token` as a top-level module, so that directory has to be on
+`sys.path`.
+
     pip install cryptography requests
 
 Environment:
@@ -16,6 +20,7 @@ Reference:
     https://docs.github.com/en/rest/git/refs
     https://docs.github.com/en/rest/pulls/pulls
     https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api
+    https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
 """
 
 from __future__ import annotations
@@ -45,12 +50,14 @@ class RateLimited(RuntimeError):
     """A 403 or 429 that a wait would clear, raised once the retries run out."""
 
 
-def _sleep_for(response: requests.Response) -> float:
-    """Return how long GitHub says to wait before retrying this request.
+def _throttle_wait(response: requests.Response) -> float | None:
+    """Return the wait GitHub's documented signals ask for, or None if neither fired.
 
-    GitHub documents three signals, in priority order: a `retry-after` header,
-    an `x-ratelimit-remaining` of 0 paired with `x-ratelimit-reset`, and
-    otherwise a minimum of one minute.
+    GitHub sends `x-ratelimit-*` headers with every response, so the presence of
+    a rate limit header proves nothing. Their values do. GitHub documents two
+    signals, in this order: a `retry-after` header, which is only present when
+    GitHub wants you to wait, and an `x-ratelimit-remaining` of 0 paired with
+    `x-ratelimit-reset`, which means the window is spent.
     """
     retry_after = response.headers.get("retry-after")
     if retry_after:
@@ -58,7 +65,16 @@ def _sleep_for(response: requests.Response) -> float:
     if response.headers.get("x-ratelimit-remaining") == "0":
         reset = float(response.headers.get("x-ratelimit-reset", "0"))
         return max(reset - time.time(), 0.0)
-    return 60.0
+    return None
+
+
+def _error_message(response: requests.Response) -> str:
+    """Return GitHub's `message` field, or "" for a body that is not JSON."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    return body.get("message", "") if isinstance(body, dict) else ""
 
 
 def call(
@@ -81,18 +97,40 @@ def call(
         )
 
         if response.status_code in (403, 429):
-            # A 403 is either "you lack the permission" or "you are throttled".
-            # GitHub only sends X-Accepted-GitHub-Permissions on the former, and
-            # only sends rate limit headers on the latter.
-            required = response.headers.get("X-Accepted-GitHub-Permissions")
-            if required:
-                raise PermissionDenied(
-                    f"{method} {path} needs {required}; the token was minted with "
-                    f"{token.permissions}"
-                )
+            # A 403 is either "you lack the permission" or "you are throttled",
+            # and only documented signals can tell them apart.
+            #
+            # 1. retry-after, or x-ratelimit-remaining of 0: GitHub is asking for
+            #    a wait. This is checked first on purpose. A permission failure
+            #    that happens to land on a spent window costs one wasted wait and
+            #    then classifies correctly on the retry, whereas the reverse
+            #    ordering hard-fails a request a wait would have cleared.
+            # 2. The documented error message. GitHub tells you to read
+            #    "Resource not accessible by integration" (or "...by personal
+            #    access token") as insufficient permissions.
+            # 3. Anything else: GitHub's guidance for a rate limit with no
+            #    explicit signal is to wait at least a minute, which covers the
+            #    secondary limits.
+            #
+            # X-Accepted-GitHub-Permissions is deliberately NOT the classifier.
+            # GitHub introduced it as the fine-grained counterpart to
+            # x-accepted-oauth-scopes so callers can discover what a route needs,
+            # and never documents it as exclusive to failures. It is used below
+            # only to say WHICH permission was missing.
+            wait = _throttle_wait(response)
+            if wait is None:
+                message = _error_message(response)
+                if "Resource not accessible by" in message:
+                    required = response.headers.get("X-Accepted-GitHub-Permissions")
+                    detail = f" needs {required};" if required else ";"
+                    raise PermissionDenied(
+                        f"{method} {path}{detail} the token was minted with "
+                        f"{token.permissions}"
+                    )
+                wait = 60.0
             if attempt == MAX_RATE_LIMIT_RETRIES:
                 raise RateLimited(f"{method} {path} still throttled after retries")
-            time.sleep(_sleep_for(response))
+            time.sleep(wait)
             continue
 
         if response.status_code == 404:
@@ -172,7 +210,12 @@ def open_pull_request(
     title: str,
     body: str,
 ) -> str:
-    """Open a pull request and return its html_url. Needs pull_requests: write."""
+    """Open a pull request and return its html_url. Needs pull_requests: write.
+
+    `draft` is left at GitHub's default rather than set here. Draft pull requests
+    on private repositories have historically required a paid plan, and a 422 for
+    that reason is indistinguishable from the other 422s this endpoint returns.
+    """
     created = call(
         token,
         "POST",
@@ -182,7 +225,6 @@ def open_pull_request(
             "head": head,
             "base": base,
             "body": body,
-            "draft": True,
             "maintainer_can_modify": True,
         },
     )
