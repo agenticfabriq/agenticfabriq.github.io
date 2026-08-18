@@ -31,7 +31,7 @@ faq:
   - question: Which Gmail OAuth scope should an AI agent use?
     answer: Start with https://www.googleapis.com/auth/gmail.readonly and add https://www.googleapis.com/auth/gmail.send only when the agent genuinely sends mail. Full access via https://mail.google.com/ is almost never justified.
   - question: Does Gmail access require a Workspace admin?
-    answer: Domain-wide delegation always needs a super admin. Individual OAuth consent usually does not, but a Workspace admin can block third-party apps or disable Gmail API access for the domain, and then every call fails with a domainPolicy 403.
+    answer: Domain-wide delegation needs a super admin to grant it and a super admin to withdraw it, with users involved in neither. Individual OAuth consent usually needs no admin, but a Workspace admin can still block third-party apps or disable Gmail API access for the domain, and then every call fails with a domainPolicy 403.
   - question: Can the agent send email without being able to read the mailbox?
     answer: Yes. The gmail.send scope allows sending mail on the user's behalf without granting any read access to existing messages.
   - question: Why did my Gmail refresh token stop working after seven days?
@@ -45,7 +45,7 @@ faq:
 - Ship the agent with `https://www.googleapis.com/auth/gmail.readonly`, prove the workflow against a real mailbox, then widen. The reverse order does not survive a security review.
 - `https://mail.google.com/` grants read, compose, send, and permanent deletion of every message in the mailbox. An agent essentially never needs it.
 - The Gmail scopes that read a mailbox — `gmail.readonly`, `gmail.modify`, `gmail.compose`, `gmail.metadata` — are Google *restricted* scopes: a public launch needs app verification, plus an annual CASA security assessment if the data can reach a third-party server. Put weeks, not days, on the calendar.
-- Per-user OAuth with a refresh token is the default. Service accounts with domain-wide delegation exist to skip user consent, which is exactly why reaching for them first is the wrong instinct.
+- Per-user OAuth with a refresh token is the default. Service accounts with domain-wide delegation exist to skip user consent, so only an administrator can grant or withdraw one — which is exactly why reaching for them first is the wrong instinct.
 - Budget quota in units, not requests: listing costs 5, reading one message costs 20, sending costs 100, against 6,000 per user per minute and 1,200,000 per project per minute.
 
 ## Who this is for
@@ -218,11 +218,15 @@ This call fails on a readonly-only grant, which is the point. Run the agent read
 | Option | When it wins | What it costs | What breaks first |
 | --- | --- | --- | --- |
 | Per-user OAuth (code + PKCE) | The agent acts for a named human who can see and revoke the grant. Default choice. | One refresh token per user per agent to store, rotate, and revoke; a consent screen in your onboarding. | Storage. At 50 users you have a secrets problem you did not plan for. |
-| Service account + domain-wide delegation | Workspace-internal, no interactive user, and the mailbox set is fixed — shared mailboxes, archival, compliance export. | Super-admin approval; one credential that can impersonate any user in scope, with no user-visible consent. | Blast radius. The key is a master key, and users cannot revoke it. |
+| Service account + domain-wide delegation | Workspace-internal, no interactive user, and the mailbox set is fixed — shared mailboxes, archival, compliance export. | Super-admin approval; one credential that can impersonate any user in scope, with no user-visible consent. | Blast radius. The key is a master key over the scopes it was authorized for, and the user has no revoke affordance, because the delegation lives on an admin-console page that requires super-administrator sign-in. |
 | Brokered credential layer | Many users, many tools, and an auditor who will ask who read whose mail. | A dependency and a policy model to maintain. | Nothing early; the cost is up front, not in the incident. |
 | IMAP or SMTP with an app password | Legacy tooling that cannot speak OAuth. | A password-equivalent secret with no scoping and no per-action audit. | Scope. There is no read-only app password, so this is full access by another name. |
 
-Domain-wide delegation deserves the sharpest warning. It exists so an application can act on Workspace user data without those users consenting, and Google constrains it only by the impersonated user's permissions and the scopes an admin authorized. Reaching for it because per-user consent is inconvenient trades a revocable, attributable grant for an unrevocable, ambient one. The narrow case where it is right: an unattended Workspace-internal job over mailboxes with no interactive owner — a shared `support@` alias, a compliance archive, an offboarded account — where there is no human to consent in the first place.
+Domain-wide delegation deserves the sharpest warning. It exists so an application can act on Workspace user data without those users consenting, and Google constrains it only by the impersonated user's permissions and the scopes an admin authorized. Reaching for it because per-user consent is inconvenient trades a user-revocable, attributable grant for one only an administrator can withdraw.
+
+Be precise about which half of that is the problem, because the revocation itself is strong. A super administrator deletes the delegation in the admin console, and Google's wording is that applications depending on that client authorization will immediately stop working — sharper than revoking a user grant, where Google warns it can take some time before the revocation has full effect. What the user loses is not the strength of the revocation but any access to it. They never consented, so there is nothing on their account permissions page to withdraw, and the delegation lives on a page that requires super-administrator sign-in. There is no indirect route either: the service account authenticates with a signed JWT assertion rather than a user refresh token, so the user-side levers — a password change, a *Remove access* click — never reach it.
+
+The narrow case where it is right: an unattended Workspace-internal job over mailboxes with no interactive owner — a shared `support@` alias, a compliance archive, an offboarded account — where there is no human to consent in the first place.
 
 ## Checklist
 
@@ -233,7 +237,7 @@ Domain-wide delegation deserves the sharpest warning. It exists so an applicatio
 - [ ] Refresh tokens are encrypted at rest, keyed by user, and excluded from logs and crash reports.
 - [ ] `invalid_grant` triggers a re-consent path, not a retry loop.
 - [ ] The OAuth client's publishing status is In production, so refresh tokens do not expire after seven days.
-- [ ] Offboarding a user revokes their refresh token via `https://oauth2.googleapis.com/revoke` and deletes it from storage.
+- [ ] Offboarding a user revokes their refresh token via `https://oauth2.googleapis.com/revoke` and deletes it from storage — or, on domain-wide delegation, offboarding is an admin-console change, because there is no user token to revoke.
 - [ ] Message bodies are truncated or redacted before they reach a model prompt, and attachment bytes are never fetched unless a step needs them.
 - [ ] Retry logic distinguishes a 403 that means throttling from a 403 that means insufficient scope.
 - [ ] You can answer, from logs, which agent read which message on whose behalf, and when.
@@ -361,4 +365,5 @@ Primary sources for everything asserted above:
 - [Gmail API usage limits](https://developers.google.com/workspace/gmail/api/reference/quota) — per-minute quota ceilings and the per-method unit costs.
 - [Handle Gmail API errors](https://developers.google.com/workspace/gmail/api/guides/handle-errors) — the 403 and 429 reason strings and the backoff guidance.
 - [Push notifications](https://developers.google.com/workspace/gmail/api/guides/push) — `users.watch`, Pub/Sub setup, and the seven-day watch expiry.
-- [Using OAuth 2.0 for server to server applications](https://developers.google.com/identity/protocols/oauth2/service-account) — domain-wide delegation and its admin authorization steps.
+- [Using OAuth 2.0 for server to server applications](https://developers.google.com/identity/protocols/oauth2/service-account) — domain-wide delegation, its admin authorization steps, and that it reaches user data without requiring the users' consent.
+- [Control API access with domain-wide delegation](https://knowledge.workspace.google.com/admin/apps/control-api-access-with-domain-wide-delegation) — that managing a delegation requires super-administrator sign-in, and that deleting one makes dependent applications stop working immediately.
