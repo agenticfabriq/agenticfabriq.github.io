@@ -105,9 +105,10 @@ def call(method: str, params: dict[str, Any] | None = None, *, json_body: bool =
 def find_channel(name: str) -> str:
     """Resolve a channel name to its id. Needs channels:read.
 
-    conversations.list is Tier 2 (20+ per minute) and pages at 100 by default,
-    1000 maximum. Resolve once and cache the id; do not scan the workspace on
-    every run.
+    conversations.list is Tier 2 (20+ per minute) and pages at 100 by default.
+    Slack documents limit as "must be an integer under 1000", so 999 is the
+    ceiling. Resolve once and cache the id; do not scan the workspace on every
+    run.
     """
     cursor = ""
     while True:

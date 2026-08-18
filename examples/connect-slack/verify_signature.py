@@ -40,7 +40,10 @@ def is_signature_valid(headers, raw_body: bytes, now: float | None = None) -> bo
     """Return True only if this request really came from Slack, recently."""
     timestamp = headers.get("X-Slack-Request-Timestamp")
     signature = headers.get("X-Slack-Signature")
-    if not timestamp or not signature:
+    # hmac.compare_digest raises TypeError on a str holding a non-ASCII code
+    # point, and header values arrive latin-1 decoded, so a malformed signature
+    # carrying a high byte would crash this handler instead of being rejected.
+    if not timestamp or not signature or not signature.isascii():
         return False
 
     try:
