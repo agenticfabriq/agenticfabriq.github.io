@@ -42,7 +42,7 @@ faq:
 
 - Run the method in one direction only: enumerate the actions from the tool definitions, map each to the narrowest scope that permits it, remove everything else, run, and treat the failures as the requirement list.
 - Start broad and narrow later does not work, and the reason is organizational rather than technical. Widening is one additive consent; narrowing is a revocation, a re-consent, and a chance of breaking production that nobody gets credit for avoiding.
-- Scope granularity varies wildly by provider. Zendesk lets you ask for `tickets:write users:read`; Linear's `read` scope "will always be present" and covers the whole account. Same intent, no equivalent expression.
+- Scope granularity varies wildly by provider. Zendesk lets you ask for `tickets:write` and `users:read` and nothing else; Linear's `read` scope "will always be present" and covers the whole account. Same intent, no equivalent expression.
 - A scope says what kind of thing; a policy says which ones. Slack's `channels:history` covers "public channels that your Slack app has been added to" — the scope is half the grant and channel membership is the other half.
 - Measure the fraction of granted scopes exercised in the last 30 days. Unexercised scope is the metric that matters because it is the only over-grant you can delete without winning an argument.
 
@@ -64,7 +64,7 @@ Layer the incentives on top. Shipping broken triage is visible in minutes and so
 
 So the only ordering that survives contact with an organization is narrow-first — not because engineers are more virtuous at the start, but because at the start the cost of being too narrow is paid within the hour, by the person who caused it, with a stack trace pointing at the exact call. That is the cheapest possible feedback loop for exactly the same information, and it is available only once.
 
-The concrete damage is worth naming. An agent granted `https://mail.google.com/` to read a support inbox can permanently delete every message in the mailbox, bypassing trash. An agent granted Linear's `write` scope because it needed to file issues holds "write access for the user's account" — Linear's own guidance is to reach for a targeted scope instead when creating is all you do. An agent with Zendesk's `write` can DELETE as well as POST, because Zendesk's write scope "gives an app access to POST, PUT, and DELETE endpoints." None of those capabilities were chosen. They arrived attached to a string, and the difference between a bad day and a catastrophic one is whether a prompt injection finds them. The [failure pillar](/fail/) collects what that looks like when it happens.
+The concrete damage is worth naming. An agent granted `https://mail.google.com/` to read a support inbox can permanently delete every message in the mailbox, bypassing trash. An agent granted Linear's `write` scope because it needed to file issues holds "write access for the user's account". Linear makes the narrower argument itself for the adjacent case — "if your application only needs to create comments, use a more targeted scope" — and the same reasoning applies to creating issues, which has its own `issues:create` scope. An agent with Zendesk's `write` can DELETE as well as POST, because Zendesk's write scope "gives access to POST, PUT, and DELETE endpoints". None of those capabilities were chosen. They arrived attached to a string, and the difference between a bad day and a catastrophic one is whether a prompt injection finds them. The [failure pillar](/fail/) collects what that looks like when it happens.
 
 ## Step by step
 
@@ -103,7 +103,7 @@ For the triage agent, the Gmail rows resolve cleanly. Reading needs `https://www
 
 The `label_message` row is more interesting, and it is the one that changed the design. Applying a label is `users.messages.modify`, and Google's reference for that method lists three acceptable scopes: `https://mail.google.com/`, `https://www.googleapis.com/auth/gmail.modify`, and `https://www.googleapis.com/auth/gmail.modify.restricted`. The obvious narrowing, `https://www.googleapis.com/auth/gmail.labels`, is not on that list — it is non-sensitive and covers "See and edit your email labels", meaning the label objects themselves, not their application to messages. So the narrowest scope Google *describes* for putting a label on a message is `gmail.modify`, which it defines as "Read, compose, and send emails from your Gmail account." Labelling one message costs you the ability to send mail as the user.
 
-That is the whole argument for running this step before you ship. The third scope in Google's list, `gmail.modify.restricted`, may well be narrower — the name suggests it — but I could not find a description of what it grants on Google's Gmail scope-choosing page, only its appearance in the method reference. Do not treat an undocumented scope as a narrowing on the strength of its name. Confirm what it permits before you request it.
+That is the whole argument for running this step before you ship. The third scope in Google's list is not a narrowing you can take. The same method reference explains what it is for: "for administrators modifying message for users in their organization, requests require authorization with a service account that has domain-wide delegation authority to impersonate users with the `https://www.googleapis.com/auth/gmail.modify.restricted` scope." That is an admin impersonation path, not a smaller per-user grant, and the scope appears on none of Google's Gmail scope-choosing page, its OAuth scopes index, or its restricted-scopes list. The general rule stands even though this instance resolved: read the sentence, and never infer a narrowing from a scope's name.
 
 The triage agent dropped `label_message` instead. Labelling was a convenience, and "the agent can send mail as any user in the mailbox" is not a price worth paying for a convenience. That trade only became visible because the scope was looked up before the code was written.
 
@@ -111,10 +111,10 @@ The triage agent dropped `label_message` instead. Labelling was a convenience, a
 
 The gap between providers is larger than most scope discussions admit. Take one intent — *the agent may create tickets and read requester records, and nothing else* — and express it against three providers.
 
-**Zendesk, reasonably fine.** Scopes take a `resource:access` shape, where read "gives access to GET endpoints" and write "gives access to POST, PUT, and DELETE endpoints." Zendesk's reference shows scope arrays in exactly that per-resource form — `["tickets:read"]`, `["users:read", "users:write"]` — rather than a blanket `read write`, and the scopeable resources include tickets, users, organizations, macros, triggers, webhooks and more. The intent becomes:
+**Zendesk, reasonably fine.** Scopes take a `resource:access` shape, where read "gives access to GET endpoints" and write "gives access to POST, PUT, and DELETE endpoints". Zendesk's reference documents both a bare form and a per-resource one — its examples include `["read"]`, `["tickets:read"]`, and `["users:read", "users:write"]` — and it is explicit that when a resource is not specified, "access to all resources is assumed". Both forms are supported; the per-resource one is always available, and you have to choose it. The scopeable resources include tickets, users, organizations, macros, triggers and webhooks. The intent becomes:
 
-```text
-tickets:write users:read
+```json
+["tickets:write", "users:read"]
 ```
 
 Residual over-grant: `tickets:write` also permits PUT and DELETE on existing tickets. There is no create-only Zendesk scope.
@@ -122,12 +122,25 @@ Residual over-grant: `tickets:write` also permits PUT and DELETE on existing tic
 **Linear, coarse in a specific way.** Linear has a targeted `issues:create` scope, described as "Allows creating new issues and their attachments" — narrower than Zendesk's write. But `read` is documented as "(Default) Read access for the user's account. This scope will always be present." You cannot drop it. The same intent becomes:
 
 ```text
-read issues:create
+read,issues:create
 ```
 
 and the token can read every issue, project, and comment the user can see. The narrowing you wanted — read *only* the requester records — has no expression. The correct response is not to pretend otherwise; it is to record in the manifest that the read grant is workspace-wide and unavoidable, and to decide whether that is acceptable for this data.
 
-**Notion, coarsest.** Notion has no OAuth scopes for this at all. An integration has capabilities: "Read content", "Update content", "Insert content", "Read comments", "Insert comments", and one of "No user information", "User information without email addresses", or "User information with email addresses". There is no per-object-type granularity and no create-versus-update split on content. The intent collapses to "Insert content" plus a user-information level, and everything else has to be enforced somewhere other than the scope.
+**Notion, coarse on a different axis.** Notion has no OAuth scopes for this at all. An integration has capabilities: "Read content", "Update content", "Insert content", "Read comments", "Insert comments", and one of "No user information", "User information without email addresses", or "User information with email addresses".
+
+On the create-versus-update axis Notion is *finer* than Zendesk. "Insert content" is "permission to create new content in a Notion workspace", and a connection holding it "is not able to update existing pages"; "Update content" is the mirror image, where a connection with only that capability "is able to call the Update page endpoint, but is not able to create new pages". Zendesk's `tickets:write` cannot make that distinction at all.
+
+Where Notion is coarse is object type and resource. There is no per-object-type capability — no equivalent of asking for tickets and not users — and no capability names a particular page. So the intent becomes:
+
+```text
+Insert content
+Read content
+```
+
+plus a user-information level chosen separately. `Read content` is the line to write down. It is needed because "Insert content" explicitly "does not give the connection access to read full objects", and it "gives a connection access to read existing content in a Notion workspace" — *which* content being determined entirely by the pages the connection has been added to, not by the capability.
+
+Notice that the three blocks above are not written the same way, and that is not a typo. The wire format is per-provider: Linear documents its `scope` request parameter as a "Comma separated list of scopes", Zendesk takes a JSON array, and Google and Slack take space-delimited strings. Notion has no wire format for this at all — capabilities are checkboxes on the integration. Get the scope set right first and the delimiter from the provider's own authorization page second, because a correct scope set in the wrong delimiter fails in a way that looks like a permissions bug.
 
 The lesson is not that some providers are bad. It is that the step-2 output is a *pair*: the narrowest scope, and the honest residual. Reviewers who only see the first half will approve a Linear `read` grant thinking it is scoped, because the word `read` sounds scoped.
 
@@ -140,8 +153,8 @@ You reach this point on almost every non-trivial agent. Two mechanisms narrow fu
 - **Slack** puts it in the scope's own definition: `channels:history` is "View messages and other content in public channels that your Slack app has been added to". Channel membership is half the grant. Likewise, withholding `chat:write.public` — "Send messages to channels your Slack app isn't a member of" — means `chat:write` reaches only the channels you invited the bot into.
 - **GitHub** puts it in the token. A fine-grained token or app installation is scoped to selected repositories, and an installation access token can be narrowed further at mint time: the `repositories` or `repository_ids` and `permissions` body parameters restrict the token below the installation, and GitHub is explicit that "the installation access token cannot be granted permissions that the app was not granted." Contrast the classic OAuth `repo` scope, which "grants full access to public and private repositories" — every repository the user can reach, with no per-repository option at all.
 - **AWS** makes the split explicit in the policy language: `Action` is the scope, `Resource` and `Condition` are the policy. This is the model everything else is approximating.
-- **Notion** has only the resource half: capabilities are workspace-level, and access is governed by which pages the connection has been added to, where "if a connection is added to a page, then the connection can access the page's children." Add the connection at the workspace root and you have granted everything.
-- **Zendesk** has neither a per-resource scope nor a per-endpoint one within a resource, so the constraint has to live outside the token.
+- **Notion** puts the entire resource constraint in page sharing. Its capabilities distinguish actions but never name an object, so which content a connection reaches is decided by which pages it has been added to, where "if a connection is added to a page, then the connection can access the page's children." Add the connection at the workspace root and you have granted everything.
+- **Zendesk** has the per-resource half and not the per-record half. You can ask for `tickets:write` rather than `write`, but nothing narrows that to a queue, a brand, or a set of ticket ids, and nothing splits POST from DELETE inside it. That constraint has to live outside the token.
 
 That last case is common and deserves a blunt note. When you enforce a resource limit in your own agent code — an allowlist of endpoints, a hardcoded label filter — you have built a boundary against a *mistaken* agent, not a compromised one. A prompt injection that gets the agent to call a different endpoint walks straight through an allowlist that lives in the same process as the prompt. If the constraint has to hold under attack, it must live somewhere the agent cannot edit: a gateway, a proxy, or the provider's own policy engine.
 
@@ -149,6 +162,7 @@ That last case is common and deserves a blunt note. When you enforce a resource 
 
 - GitHub installation access tokens "expire one hour from the time you create them." Minting one per run, with `permissions` cut down to that run's needs, means a leaked token is worth an hour of a subset of the app's authority rather than the app's whole authority forever.
 - AWS STS `AssumeRole` accepts `DurationSeconds` from 900 to 43200, defaulting to 3600 and capped by the role's maximum session duration, which "can have a value from 1 hour to 12 hours." More usefully, it accepts session policies: "the resulting session's permissions are the intersection of the role's identity-based policy and the session policies", and they "cannot be used to grant more permissions than those allowed by the identity-based policy". That is a down-scoping primitive — one role, a different narrow slice per run, computed from the task.
+- Zendesk is the useful counterexample, because it shows that coarse scopes do not force long-lived credentials. Its access tokens are valid for 30 minutes by default and configurable from 5 minutes to 48 hours, and its refresh tokens 30 days by default, configurable from 7 to 90. A blunt scope axis does not make the time axis blunt.
 - Microsoft Entra Privileged Identity Management is the same idea as a product, and its vocabulary is worth borrowing even if you do not use it. An *eligible* assignment "requires a user to perform one or more actions to use the role"; *activation* may require multifactor authentication, a business justification, or approval; and assignments can be time-bound with start and end dates.
 
 The agent translation: the destructive tool is registered but its credential is not held. Calling it triggers an elevation request that a human approves, the approval carries a justification and an expiry, and the credential dies when the run does.
@@ -165,7 +179,7 @@ Mint a **fresh** credential holding only the mapped scopes. Do not edit the exis
 
 Then set the run up so failures are loud:
 
-- Disable retry on 403 for the duration. Retrying a permission error with backoff turns a five-second answer into a twenty-minute mystery, and on Gmail specifically a 403 can mean throttling *or* insufficient scope, so a blanket retry will swallow exactly the signal you are collecting.
+- Disable retry on 403 for the duration. Retrying a permission error with backoff turns a five-second answer into a twenty-minute mystery, and the two conditions are not distinguishable by status code alone — Google's Gmail error guide says of 403 that "these errors occur when you exceed a usage limit or the user doesn't have the correct privileges", so a blanket retry will swallow exactly the signal you are collecting.
 - Log every denial with the tool name, the API call, the status code, and the provider's error reason string. The reason string is the part that tells you which scope was missing.
 - Run the real workload, not a smoke test. A smoke test exercises the paths you remembered, which are the paths you already mapped. The value of this step is entirely in the paths you forgot.
 
@@ -208,7 +222,7 @@ Grant(
 )
 ```
 
-Running that file with `--check` exits non-zero when any of those fields is missing, so an unjustified widening fails CI rather than passing review by fatigue. The `over_grant` field is the one that earns its keep: a grant that admits it is wider than the action needs, and names no compensating limit, is rejected by the check rather than by a reviewer who has to notice.
+Running that file with `--check` rejects a row that names no tool, names no API call, offers a reason of only a few words, or carries no reviewer — and, separately, a row that admits an `over_grant` while naming no compensating limit. `resource_limit` is not required on its own: the `users:read` row is narrow enough to need no compensating control and passes with it empty. That last rule is the one that earns its keep, because it puts the burden on the grant that has already confessed to being wider than its action needs, rather than on a reviewer who has to notice.
 
 **Removed scopes stay in the file.** Deleting a line makes the question invisible to the next reader, who will ask it again and may answer it differently. The manifest keeps a retired section: the scope, and why it went. That is how "we tried `gmail.modify` and dropped the labelling feature instead" survives the departure of the person who decided it.
 
@@ -220,7 +234,7 @@ Where the evidence comes from, and what it is worth:
 - **AWS** goes further than anyone. IAM last accessed information gives service-level and action-level data with a tracking period of "at least 400 days" for services, IAM Access Analyzer unused access analyzers continuously flag unused services and actions across an organization, and Access Analyzer can generate a policy from CloudTrail activity for a date range. Three caveats AWS documents and you should repeat to anyone reading your report: the data "includes all attempts to access an AWS API, not just the successful attempts", action last accessed covers management events and "is not available for any data plane event", and `iam:PassRole` is not tracked at all.
 - **Everyone else.** Zendesk, Linear, Notion and most SaaS providers publish no per-scope usage report I could find. For those you instrument the only place that sees every call — your own agent runtime or the gateway it routes through. If neither logs the tool name and outcome per call, that is the first thing to fix, because without it this metric cannot be computed at all.
 
-`examples/govern-least-privilege/unexercised_scopes.py` computes the report from already-fetched activity records, so it runs with no credentials. Read its two caveats before you trust a number it prints: the method-to-scope mapping is a hand-maintained table, and a missing entry makes a scope that is in daily use look dead.
+`examples/govern-least-privilege/unexercised_scopes.py` computes the report from already-fetched activity records, so it runs with no credentials. It does not hardcode the scope set: it imports the manifest and analyses the pre-narrowing grant — everything currently granted plus everything in the retired section — which is how the two removals recorded above were justified in the first place. Run it and the two scopes it flags are exactly `gmail.modify` and `channels:history`. Read its two caveats before you trust a number it prints: the call-to-scope mapping is derived from each manifest row's own `calls` field, so an incomplete row makes a live scope look dead, and an attempted call is not a successful one.
 
 ### The scope set this produced, with a line of justification each
 
@@ -235,7 +249,7 @@ End state for the triage agent, which is the artifact to paste into the pull req
 
 And the two grants that are *not* there, with their reasons, because a reviewer needs those more than the four above:
 
-- `https://www.googleapis.com/auth/gmail.modify` — the narrowest scope Google describes for `users.messages.modify`, but it also grants compose and send. The `label_message` tool was dropped instead. Revisit if `gmail.modify.restricted` turns out to be narrower.
+- `https://www.googleapis.com/auth/gmail.modify` — the narrowest scope Google describes for `users.messages.modify` in a per-user flow, but it also grants compose and send. The `label_message` tool was dropped instead. `gmail.modify.restricted` is the service-account domain-wide-delegation path for administrators, not a narrower alternative here.
 - `channels:history` — added for a channel-reading feature that was cut before launch. Zero calls in 30 days; removed by the unexercised-scope report.
 
 Six lines. Every one of them names a call, and the two most useful lines are about scopes the agent does not hold. That is the deliverable.
@@ -252,7 +266,7 @@ Most real agents use all three: narrow scopes for the routine path, a policy lay
 
 ## Checklist
 
-Run this against the pull request, not against the running system. Every item is checkable from the diff plus the provider's scope reference.
+Run this against the pull request, not against the running system. Everything down to the last item is checkable from the diff plus the provider's scope reference.
 
 - [ ] Every scope in the diff names a specific API call the agent makes, in a comment or a manifest entry.
 - [ ] For each scope, the reviewer can state what it permits *beyond* that call, from the provider's own scope page.
@@ -267,6 +281,8 @@ Run this against the pull request, not against the running system. Every item is
 - [ ] The grant is a new credential rather than an edit to an existing one, so revocation does not affect anything else.
 - [ ] Scopes removed in this change are recorded as retired with a reason, not deleted from the file.
 - [ ] The last unexercised-scope report is attached or linked, and no scope on it at zero calls is being retained without a written reason.
+And one thing the diff cannot tell you, which is worth asking anyway before the grant ships:
+
 - [ ] You can answer, from logs, which agent used which scope against which resource, and on whose behalf. If not, see the [governance pillar](/govern/) for the attribution side of this.
 
 ## Failure modes
@@ -354,7 +370,9 @@ async def main() -> None:
         names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
 
         print(f"agents registered: {len(agents)}")
-        for name in sorted(names - APPROVED_TOOLS):
+        # A tool dict with no "name" key puts None in the set, and sorted()
+        # raises TypeError comparing None to str. Drop the falsy entries first.
+        for name in sorted(n for n in names - APPROVED_TOOLS if n):
             print(f"UNDECLARED  {name}  -- callable but not in the manifest")
 
         result = await af.invoke_connection(
@@ -383,12 +401,13 @@ Primary sources for the literals above:
 
 - [Choose Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes) — the exact Gmail scope strings, their descriptions, and their non-sensitive, sensitive, and restricted classifications.
 - [Method: users.messages.modify](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/modify) — the three scopes that permit applying a label to a message.
+- [Handle Gmail API errors](https://developers.google.com/workspace/gmail/api/guides/handle-errors) — what a 403 actually covers, which is why you disable retry on it while running step 3.
 - [Using OAuth 2.0 for web server applications](https://developers.google.com/identity/protocols/oauth2/web-server) — incremental authorization via `include_granted_scopes`, and the requirement to verify which scopes were granted.
 - [OAuth Token Audit Activity Events](https://developers.google.com/workspace/admin/reports/v1/appendix/activity/token) — the `activity`, `authorize`, `deny`, `request`, and `revoke` events and the `api_name`, `method_name`, `client_id`, `app_name`, and `scope` parameters.
-- [Zendesk OAuth Tokens reference](https://developer.zendesk.com/api-reference/ticketing/oauth/oauth_tokens/) — the `resource:access` scope shape and what read and write map to in HTTP verbs.
-- [Linear OAuth 2.0 authentication](https://linear.app/developers/oauth-2-0-authentication) — the `read`, `write`, `issues:create`, `comments:create`, and `admin` scopes and the note that `read` is always present.
+- [Zendesk OAuth Tokens reference](https://developer.zendesk.com/api-reference/ticketing/oauth/oauth_tokens/) — the `resource:access` scope shape, what read and write map to in HTTP verbs, the "access to all resources is assumed" default, and the access and refresh token lifetimes with their configurable ranges.
+- [Linear OAuth 2.0 authentication](https://linear.app/developers/oauth-2-0-authentication) — the `read`, `write`, `issues:create`, `comments:create`, and `admin` scopes, the note that `read` is always present, the comma-separated `scope` parameter format, and the targeted-scope advice for comments.
 - [Slack OAuth scopes reference](https://docs.slack.dev/reference/scopes) — `chat:write`, `chat:write.public`, and the channel-membership wording in `channels:history`.
-- [Notion integration capabilities](https://developers.notion.com/reference/capabilities) — the content, comment, and user capability set, and how page-level access is granted.
+- [Notion integration capabilities](https://developers.notion.com/reference/capabilities) — the content, comment, and user capability set, the Insert-versus-Update split and what each one cannot do, and how page-level access is granted.
 - [Scopes for OAuth apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) — the classic `repo` scope and what "full access" covers.
 - [Permissions required for fine-grained personal access tokens](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens) — the per-permission endpoint mapping for fine-grained tokens.
 - [GitHub Apps REST API](https://docs.github.com/en/rest/apps/apps) — installation access tokens, their one-hour expiry, and the `repositories` and `permissions` down-scoping parameters.
