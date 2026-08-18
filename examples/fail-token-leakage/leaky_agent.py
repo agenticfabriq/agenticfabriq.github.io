@@ -27,7 +27,10 @@ from toy_model import (
 
 # Not hardcoded, which is the part everybody gets right. It is still going into
 # the context window three lines below, which is the part that matters.
-API_KEY = os.environ.get("BILLING_API_KEY", DEMO_CREDENTIAL)
+#
+# The override name is deliberately unusable for any real service. Whatever you
+# put here is printed to stdout three times, so do not point it at a live key.
+API_KEY = os.environ.get("TOKEN_LEAKAGE_DEMO_FAKE_KEY", DEMO_CREDENTIAL)
 
 SYSTEM_PROMPT = f"""\
 You are a billing support agent.
@@ -65,10 +68,14 @@ def capture_trace(messages: list[dict[str, str]], output: str) -> dict[str, obje
     """What an observability SDK records when content capture is switched on.
 
     The attribute names are the OpenTelemetry GenAI ones. The convention marks
-    all three Opt-In and warns they are "likely to contain sensitive
-    information", and instrumentations gate them behind an explicit opt-in such
-    as OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT. Someone switched it
-    on to debug a bad summary, in a staging environment, eight months ago.
+    all three Opt-In. The warnings differ by attribute and are worth reading
+    exactly: gen_ai.input.messages and gen_ai.output.messages are "likely to
+    contain sensitive information including user/PII data", while
+    gen_ai.system_instructions -- the one carrying the key below -- says only
+    "may contain sensitive information". Instrumentations gate all of them
+    behind an explicit opt-in such as
+    OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT. Someone switched it on
+    to debug a bad summary, in a staging environment, eight months ago.
     """
     system = next(m["content"] for m in messages if m["role"] == "system")
     return {

