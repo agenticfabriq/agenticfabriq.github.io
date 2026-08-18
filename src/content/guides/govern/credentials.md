@@ -33,7 +33,7 @@ faq:
   - question: What is the difference between rotating a credential and revoking it?
     answer: Rotation replaces a credential on a schedule and normally leaves the old one valid through an overlap window. Revocation makes one specific credential stop working immediately. A system that can only rotate cannot end an incident, because the leaked credential stays valid until the overlap window closes.
   - question: How do you rotate a secret without downtime?
-    answer: Add the new credential at the resource before anything signs or authenticates with it, test it, promote it for new issuance, wait out the longest lifetime any outstanding old credential can have, and only then retire the old one. Retiring before that wait is what causes the outage.
+    answer: Add the new credential at the resource before anything signs or authenticates with it, test it on a fresh connection, promote it for new issuance, wait out the longest lifetime any outstanding old credential can have, and only then retire the old one. Retiring before that wait is what causes the outage. Where a principal can hold only one credential at a time, such as a database user with one password, create a second principal and alternate between them, because there is no overlap window otherwise.
   - question: How long should an agent's credentials live?
     answer: Short enough that expiry alone bounds a leak you never detect. A credential scoped to one user and one resource for five minutes is reachable for five minutes whether or not anyone notices it leaked, which is the only property that does not depend on your detection speed.
   - question: Can an AI agent leak a credential through its own output?
@@ -50,7 +50,7 @@ faq:
 
 ## Who this is for
 
-You are running an agent that acts for more than one person against a system that holds more than one person's data, and today it authenticates with a secret that was set once and has not changed since. This guide covers what that secret costs, how to replace it with per-request issuance, and how to rotate and revoke afterwards. Skip it if your agent is single-tenant, unattended, and touches exactly one resource whose entire contents every operator may already read — there the environment variable is honest about what it grants, and the machinery below buys you a shorter blast radius you did not have.
+You are running an agent that acts for more than one person against a system that holds more than one person's data, and today it authenticates with a secret that was set once and has not changed since. This guide covers what that secret costs, how to replace it with per-request issuance, and how to rotate and revoke afterwards. Skip it if your agent is single-tenant, unattended, and touches exactly one resource whose entire contents every operator may already read — there the environment variable is honest about what it grants, and the machinery below narrows a blast radius that was never wide.
 
 ## The problem
 
@@ -84,7 +84,7 @@ Those numbers are a worked example, not a measurement — substitute your own. W
 
 ### The vault that is a filing cabinet
 
-A vault earns its keep by *issuing* credentials, not by *storing* them. HashiCorp Vault's database secrets engine, for instance, generates database credentials dynamically per role and attaches a lease to them; `vault lease revoke LEASE_ID` revokes them at the database, and the role's `default_ttl` and `max_ttl` fields bound how long they can live ([database secrets engine](https://developer.hashicorp.com/vault/docs/secrets/databases)). That is a different object from a `kv` path holding one password that ten services read at boot. The second shape is worth something — the secret is no longer in a repository, and reads are audited — but the credential in the process is still long-lived, still the union, and still reaches everything. If your migration plan ends at "read it from the vault instead of the environment", you have bought the audit log and none of the blast radius.
+A vault earns its keep by *issuing* credentials, not by *storing* them. HashiCorp Vault's database secrets engine, for instance, "generates database credentials dynamically based on configured roles", and the role's `default_ttl` and `max_ttl` fields bound how long a set of them can live ([database secrets engine](https://developer.hashicorp.com/vault/docs/secrets/databases)). Each set is issued under a lease, and `vault lease revoke LEASE_ID` "revokes the lease on a secret, invalidating the underlying secret" ([lease revoke](https://developer.hashicorp.com/vault/docs/commands/lease/revoke)). That is a different object from a `kv` path holding one password that ten services read at boot. The second shape is worth something — the secret is no longer in a repository, and reads are audited — but the credential in the process is still long-lived, still the union, and still reaches everything. If your migration plan ends at "read it from the vault instead of the environment", you have bought the audit log and none of the blast radius.
 
 ## Step by step
 
@@ -147,11 +147,23 @@ Running `issuing_broker.py` shows what changed. Amara's credential is refused by
   db:orders rejected it for another subject: credential is for 'amara@example.com', not 'bo@example.com'
 ```
 
-Two design notes that matter more than the code. First, `read_workload_identity()` reads the token from disk on every call rather than caching it at import, because the kubelet rewrites that file. A process that reads it once at startup works for an hour and then fails, which is the same bug as caching an access token past its expiry. Second, the broker records every value it mints in `self.minted`. That set is not bookkeeping; it is what step 4 feeds to the log redactor. The two halves live in separate example files so each is readable on its own — in a deployment they are one object, because a redactor that is not fed by the issuer redacts the credentials you remembered to tell it about.
+Three design notes that matter more than the code. First, `read_workload_identity()` reads the token from disk on every call rather than caching it at import, because the kubelet rewrites that file. A process that reads it once at startup works for an hour and then fails, which is the same bug as caching an access token past its expiry. Second, the broker records every value it mints in `self.minted`. That set is not bookkeeping; it is what step 4 feeds to the log redactor. The two halves live in separate example files so each is readable on its own — in a deployment they are one object, because a redactor that is not fed by the issuer redacts the credentials you remembered to tell it about.
+
+Third, every parse failure in the verifier has to leave as a rejection. `Resource.authorize()` runs `split`, base64-decode, and `json.loads` on a string an unauthenticated caller chose, and a decoder exception escaping that method is a 500 where you owed a 401 — plus a traceback carrying the attacker's token into your logs. Run `issuing_broker.py` and the last block shows the property holding rather than asserting it:
+
+```text
+== malformed input is denied, never raised ==
+  one-character signature  -> Denied: malformed credential (binascii.Error)
+  non-base64 body          -> Denied: signature does not verify
+  two segments             -> Denied: malformed credential (ValueError)
+  unknown version          -> Denied: unsupported credential version 'v2'
+```
+
+The claim check after the signature verifies gets the same treatment: `payload["exp"]` on a payload missing `exp` is a `KeyError` out of the same boundary, so the shape is checked before the claims are read.
 
 ### 4. Keep the credential out of the logs and out of the model
 
-Call-site redaction fails for a reason that has nothing to do with discipline: you do not own all the call sites. Your HTTP library logs request headers at DEBUG. Your framework logs the connection string when a connection fails. A `logging.exception` renders a traceback in which the credential appears as an argument to the frame that raised. Redacting at every `log.info` you wrote leaves all of those.
+Call-site redaction fails for a reason that has nothing to do with discipline: you do not own all the call sites. Your HTTP library logs request headers at DEBUG. Your framework logs the connection string when a connection fails. A `logging.exception` renders a traceback, and the credential is usually sitting in the exception's own message, because `raise RuntimeError(f"upstream rejected {token}")` put it there. Be precise about the mechanism: the standard library's traceback prints each frame's *source line*, not its values, so the frame shows the literal `{token}` and the final `RuntimeError:` line shows the credential. Formatters that do capture frame locals — `rich`, `better-exceptions`, and crash reporters that attach local variables — print the value at every frame as well. Either way it is in the rendered output, and it never passed through a `log.info` you wrote.
 
 Redacting at the *logger* does not fix it either, and this is worth internalising because it looks like it should. A filter added to a logger is consulted only for records logged directly on that logger; a record created on a descendant logger propagates to the ancestor's handlers without ever passing the ancestor's filters ([logging flow](https://docs.python.org/3/howto/logging.html#logging-flow)). `examples/govern-credentials/redacting_logger.py` prints the difference:
 
@@ -167,6 +179,16 @@ class RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         return self._registry.scrub(super().format(record))
 ```
+
+One formatter is not every formatter, and this is the miss most likely to reach production. A record goes to the handlers of its own logger *and* of every ancestor, and each handler renders it with its own formatter — yours is not consulted by the one beside it. So a `RedactingFormatter` on your `basicConfig()` handler does nothing about a crash reporter's logging integration, a log-export SDK's handler, or the file handler your framework attached at startup. Demo E is one logger, two handlers, one leak:
+
+```text
+-- E. formatter on one of two handlers: LEAKED
+     redacted handler: agent INFO issued credential [redacted]
+     other handler:    agent INFO issued credential v1.k1.eyJzdWIiOiJhbWFyYSJ9.G3nR4pQ7wZk1s0Tq
+```
+
+The invariant is not "a redacting formatter exists". It is "every handler that can receive a record has one" — which means enumerating handlers at startup, after your observability SDKs have installed theirs, and failing the boot if one is unguarded.
 
 A filter on the handler is better than a filter on a logger, but it still has two structural blind spots that the same example demonstrates: it cannot reach exception text, which the formatter renders later, and it can only scrub arguments that are already strings, so `log.warning("failed: %s", exc)` slips an exception object past it to be stringified inside `getMessage()`. Coercing every argument to a string inside the filter would change what `%d` and `%r` produce. Use the formatter.
 
@@ -195,6 +217,8 @@ Here is the sequence in full, including the two steps that follow `finishSecret`
 5. **Drain.** Wait for the longest lifetime any outstanding old credential can have. This is a number you already know, because you set it: the credential TTL, or the maximum of the client cache TTL, the longest connection lifetime, and the longest in-flight job, whichever model fits your system.
 6. **Retire.** Remove the old credential from the resource's accepted set. The window closes here, and only here does the old credential stop working.
 
+Write down the rollback too, because the failure you have not planned for is the promoted credential dying under production load rather than in step 3. Between steps 4 and 5 the rollback is one move: put the label back. Secrets Manager keeps the outgoing version under `AWSPREVIOUS` for exactly this, and the old credential still works because step 6 has not run — that is the second thing the overlap window buys you. After step 6 there is no rollback, only another rotation, which is one more reason not to collapse the drain and the retirement into a single job run.
+
 Steps 2 and 6 are the resource's side of the window. The client's side is dual-read, and it is one rule: during the window a caller may be holding either credential, so an authentication failure has to trigger a re-read of the label and exactly one retry, not a backoff loop and not a crash. Two credentials being simultaneously valid is what makes that retry succeed; without step 2's "add, do not replace" the retry fails identically. Cap it at one retry, because a second failure means the credential is wrong rather than stale, and a loop against a rejected credential is how a rotation bug becomes a lockout.
 
 `rotate_with_overlap.py` runs that sequence against a fake clock and prints the timeline. The overlap is explicit, the drain is exactly the 300-second credential TTL, and no check inside the window fails:
@@ -204,8 +228,12 @@ Steps 2 and 6 are the resource's side of the window. The client's side is dual-r
     t=   20s  in-flight k1 credential: accepted (280s left)
     t=   40s  4. finish: k2 is now the signing key. New credentials are k2-signed.
     t=   40s  in-flight k1 credential: accepted (260s left)
+    t=  340s  5. drain: waited 300s, the longest life a k1 credential could have had.
+    t=  340s  in-flight k1 credential: DENIED — credential expired
     t=  340s  6. retire: resource accepts ['k2']. OVERLAP WINDOW CLOSES.
 ```
+
+Read the `DENIED` at t=340 carefully, because it is the success condition rather than a failure: that credential ran out its own clock, which is exactly the state step 6 needs to find. The script says so on the next line. If anything is still *accepted* when you reach step 6, your drain was too short.
 
 Then it runs the reordering, doing step 6 before step 5, which is the failure this whole ordering exists to prevent:
 
@@ -234,7 +262,7 @@ Rotation is scheduled and gradual. Revocation is immediate and targeted, and the
 
 There are only three ways to actually revoke, and it is worth knowing which one you have:
 
-- **Delete the principal at the resource.** Vault's dynamic database credentials work this way: the credentials Vault generated exist at the database under a lease, and `vault lease revoke LEASE_ID` revokes them there. No verifier has to be consulted, because there is nothing left to authenticate as. Strongest, and available only when the credential corresponds to a real principal you created.
+- **Invalidate the credential at the source.** Vault's dynamic database credentials work this way: each set is issued under a lease, and revoking the lease invalidates the underlying secret rather than blocking it. The credential stops working where it is used, which is what separates this shape from the next one. Available only when the issuer created something it can take back — and read the flags before you rely on it: Vault's `-force` "Delete[s] the lease from Vault even if the secret engine revocation fails", so a forced revoke can record success while the credential is still live at the database.
 - **Deny at the authorizer.** AWS revokes role sessions by attaching an inline policy named `AWSRevokeOlderSessions` that denies everything when `aws:TokenIssueTime` is `DateLessThan` a timestamp ([revoke temporary credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)). Read what that means precisely: the credential still authenticates. It simply no longer authorizes anything. AWS also sets the cut-off "approximately 30 seconds into the future" to cover policy propagation, and notes you cannot revoke sessions for a service-linked role.
 - **Expiry.** If the lifetime is shorter than the time it takes you to notice and respond, expiry *is* your revocation. This is the only one that works when nobody is watching, and it is why step 3 issues with a five-minute TTL.
 
@@ -260,7 +288,8 @@ The bottom row's cost is not in the table because it is not per-credential: you 
 - [ ] Every trust policy that accepts a federated token conditions on both the audience and the subject, and the subject condition names a specific repository, branch, environment, or service account.
 - [ ] Issued credentials carry a subject, a resource, and an expiry, and the verifier checks all three rather than only the signature.
 - [ ] The credential TTL is a number you chose deliberately and can state, and it is shorter than your realistic detection-to-response time.
-- [ ] Log redaction lives in a formatter or handler shared by every logger in the process, and a test asserts that a credential logged by a third-party library's logger does not appear in the output.
+- [ ] Log redaction lives in a formatter on *every handler that can receive a record*, including handlers added by frameworks, crash reporters, and observability SDKs, and startup enumerates the handler list and fails if one is unguarded.
+- [ ] A test asserts that a credential logged by a third-party library's logger does not appear in the output of any handler, not just the first one.
 - [ ] The redactor is fed by the issuer, so every value that gets minted is a value that gets scrubbed.
 - [ ] No credential is placed in a model prompt, a tool result, or a stored conversation, and tool results are stripped of `Authorization`, `Cookie`, and `Set-Cookie` headers before they become context.
 - [ ] The rotation runbook adds the new credential at the resource before anything uses it, and retires the old one only after a drain period you can compute rather than estimate.
@@ -284,9 +313,9 @@ The bottom row's cost is not in the table because it is not per-credential: you 
 
 **Symptom:** nothing. This one has no symptom until it is used, which is why it is worth grepping for today.
 
-**Cause:** a role trust policy for GitHub Actions OIDC that conditions on `token.actions.githubusercontent.com:aud` and not on `:sub`. The audience value is not a secret — for the AWS integration it is `sts.amazonaws.com` — and any repository on GitHub can request a token carrying it. GitHub's own guidance is to evaluate the `sub` condition to limit which workflows can assume the role, and its example uses `"token.actions.githubusercontent.com:sub": "repo:octo-org/octo-repo:ref:refs/heads/octo-branch"` ([configuring OIDC in AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)). A `StringLike` of `repo:octo-org/octo-repo:*` is narrower but still matches every branch, tag, environment, and pull request in that repository, so anything that can cause a workflow to run there can assume the role.
+**Cause:** a role trust policy for GitHub Actions OIDC that conditions on `token.actions.githubusercontent.com:aud` and not on `:sub`. The audience value is not a secret — for the AWS integration it is `sts.amazonaws.com` — and any repository on GitHub can request a token carrying it. The guidance on GitHub's page is AWS's, not GitHub's: it reports that AWS IAM recommends evaluating the `token.actions.githubusercontent.com:sub` condition key to limit which GitHub Actions can assume the role, and its example uses `"token.actions.githubusercontent.com:sub": "repo:octo-org/octo-repo:ref:refs/heads/octo-branch"` ([configuring OIDC in AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)). A `StringLike` of `repo:octo-org/octo-repo:*` is narrower but still matches every branch, pull request merge branch, and environment in that repository, so anything that can cause a workflow to run there can assume the role.
 
-**Fix:** condition on `sub` with `StringEquals` against a specific ref or environment wherever you can, and treat `StringLike` with a trailing wildcard as a decision you justify in the pull request. One caveat you should verify against the current page rather than take from here: GitHub documents that repositories created after July 15, 2026 use an immutable `sub` format embedding numeric ids, of the form `repo:octo-org@123456/octo-repo@456789:ref:refs/heads/main`. A policy matching the older string form will not match the newer one, and the failure is a broken deploy rather than an insecure one — but check the format your repositories actually emit before writing the condition.
+**Fix:** condition on `sub` with `StringEquals` against a specific ref or environment wherever you can, and treat `StringLike` with a trailing wildcard as a decision you justify in the pull request. One caveat you should verify against the current page rather than take from here: GitHub documents that repositories created after July 15, 2026 — and repositories that have opted in to immutable subject claims, whenever they were created — use a `sub` format embedding numeric ids, of the form `repo:octo-org@123456/octo-repo@456789:ref:refs/heads/main`. A policy matching the older string form will not match the newer one, and the failure is a broken deploy rather than an insecure one — but check the format your repositories actually emit before writing the condition.
 
 ### The agent worked for an hour and then every call returned 401
 
@@ -302,15 +331,15 @@ The bottom row's cost is not in the table because it is not per-credential: you 
 
 **Cause:** AWS implements session revocation as a deny policy, not as credential invalidation. It attaches an inline policy named `AWSRevokeOlderSessions` that denies `"Action": "*"` on `"Resource": "*"` under a `DateLessThan` condition on `aws:TokenIssueTime`, and the condition "applies the restrictions only if the user assumed the role *before* the point in time when you revoke the permissions". AWS sets that point approximately thirty seconds into the future to absorb policy propagation delay, and states plainly that "any user who assumes the role more than approximately 30 seconds after you choose Revoke active sessions is not affected". So the credential remains a valid signing key for its whole natural lifetime; what stands between it and your data is one policy, evaluated per request and subject to propagation. Edit or detach that policy later and the credential works again.
 
-**Fix:** know which of the three revocation shapes you have, and do not treat a deny policy as destruction. Where the credential corresponds to a principal you created, delete the principal. Where it does not, treat the deny policy as a mitigation with a propagation window, and keep the session duration short so expiry closes the rest of the gap. Note that you cannot revoke sessions for a service-linked role at all, and that valid users whose sessions you revoked have to acquire new credentials — the AWS CLI caches until expiry, so `rm -r ~/.aws/cli/cache` is part of the runbook.
+**Fix:** know which of the three revocation shapes you have, and do not treat a deny policy as invalidation. Where the issuer created something it can take back, revoke it at the source. Where it did not, treat the deny policy as a mitigation with a propagation window, and keep the session duration short so expiry closes the rest of the gap. Note that you cannot revoke sessions for a service-linked role at all, and that valid users whose sessions you revoked have to acquire new credentials — the AWS CLI caches until expiry, so `rm -r ~/.aws/cli/cache` is part of the runbook.
 
 ### The credential appeared in the model's summary of what it did
 
 **Symptom:** a conversation transcript, a trace, or a support ticket contains a live credential that no line of your code ever logged.
 
-**Cause:** the credential entered the model's context — as a tool result containing raw response headers, as a debug tool echoing the request it made, or as an exception message rendered into the transcript — and the model reproduced it, because reproducing its input is what it does. From there it is in the provider's request log, in the prompt cache, and in every subsequent turn of the conversation you replay.
+**Cause:** the credential entered the model's context and the model reproduced it, for the reason step 4 gives. The usual entry points are a tool result carrying raw response headers, a debug tool echoing the request it made, and an exception message rendered into the transcript.
 
-**Fix:** move the credential below the model. The executor attaches it at the transport boundary and strips it from anything returned upward: `Authorization`, `Cookie`, and `Set-Cookie` at minimum, plus whatever your provider uses. Redact tool results before they are appended to context, not only before they are logged — those are different code paths, and only one of them is the logger. Then treat any credential that reached a context as leaked, and revoke it rather than waiting for it to expire.
+**Fix:** the structural rule is step 4's, so this is only the part specific to the incident. Redact tool results on the path where they are *appended to context*, not only on the path where they are logged — those are different code paths, and only one of them runs through a logging handler, which is why a correct redaction setup does not cover this on its own. Then treat any credential that reached a context as leaked, and revoke it rather than waiting for it to expire: it is already in the provider's request log and in every stored turn of that conversation.
 
 ### You deleted the secret from the environment and it was still there
 
@@ -388,5 +417,6 @@ Primary sources for everything asserted above:
 - [Rotation by Lambda function](https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotate-secrets_lambda.html) and [Lambda rotation functions](https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotate-secrets_lambda-functions.html) — the four `Step` values and what each staging label does.
 - [Lambda function rotation strategies](https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotation-strategy.html) — single-user versus alternating-users, and the window each leaves.
 - [Revoke IAM role temporary security credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html) — `AWSRevokeOlderSessions`, the `aws:TokenIssueTime` condition, and the thirty-second forward window.
-- [Vault database secrets engine](https://developer.hashicorp.com/vault/docs/secrets/databases) — dynamic per-request database users, leases, and `vault lease revoke`.
+- [Vault database secrets engine](https://developer.hashicorp.com/vault/docs/secrets/databases) — dynamic credential generation from configured roles, and the `default_ttl` and `max_ttl` role fields.
+- [`vault lease revoke`](https://developer.hashicorp.com/vault/docs/commands/lease/revoke) — that revoking a lease invalidates the underlying secret, and what `-prefix` and `-force` do.
 - [Python logging flow](https://docs.python.org/3/howto/logging.html#logging-flow) — where logger filters and handler filters sit relative to propagation.
