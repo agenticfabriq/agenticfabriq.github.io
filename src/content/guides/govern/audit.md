@@ -24,7 +24,7 @@ howTo:
   - name: Emit the record at the policy decision point
     text: Wrap policy evaluation and the call in one function so a denial produces a record even though no call was ever made.
   - name: Make the store append-only and tamper-evident
-    text: Grant the writer INSERT only, block UPDATE and DELETE with a trigger, chain each record to the previous hash, and anchor the head hash somewhere the store's operator does not control.
+    text: Grant INSERT column by column so the writer cannot supply its own recorded_at, block UPDATE and DELETE with a trigger, store the exact bytes you hashed, serialise writers per chain, and anchor the head hash somewhere the store's operator does not control.
   - name: Index for the query the investigation actually runs
     text: Put the two equality columns first and the time range last, so agent plus principal plus window is an index scan rather than a table scan.
   - name: Run the investigation and check the clocks
@@ -35,13 +35,13 @@ faq:
   - question: Does SOC 2 require an immutable audit log?
     answer: SOC 2 is an attestation engagement against the AICPA Trust Services Criteria, and the categories in scope are selected for the engagement rather than fixed. The criteria are control objectives, and your auditor tests the controls you describe against them, so the specifics — field list, storage technology, retention period — come from your own documented policy plus any regulation that applies to you. If someone quotes you a SOC 2 logging requirement, ask which criterion it is and read that criterion.
   - question: How long should you keep AI agent audit logs?
-    answer: There is no general-purpose standard number. NIST SP 800-53 writes audit record retention as an organisation-defined time period rather than a fixed value, and general security frameworks leave that blank for you to fill. Sector rules are the exception — financial and health recordkeeping carry real statutory periods, so check whether one applies to you. Otherwise set it where the cost of being unable to investigate an old incident meets the cost and risk of holding personal data longer, and write down which pressure set the number.
+    answer: There is no general-purpose standard number. NIST SP 800-53 writes audit record retention as an organisation-defined time period consistent with your records retention policy, rather than as a fixed value. Where a number does come from outside your company it is usually a sector rule — financial and health recordkeeping carry real statutory periods — so check whether one applies to you and cite it if it does. Otherwise set it where the cost of being unable to investigate an old incident meets the cost and risk of holding personal data longer, and write down which pressure set the number.
   - question: Are application logs good enough as an audit trail?
     answer: No. Application logs are lossy by design, their shape changes whenever a developer edits a log line, they usually omit denied actions entirely, and the service being audited normally holds permission to delete them. An audit trail needs a fixed schema, a record for every attempted action including refusals, and a store the audited component cannot write over.
   - question: Should an agent audit log store the arguments passed to a tool?
     answer: Store a digest of the complete argument set plus an allowlisted subset of low-risk keys in the clear, not the raw arguments. The digest lets you confirm later that a specific argument set was the one used, while keeping credentials, document bodies, and personal data out of a store that many people can read and that you may be unable to delete from.
   - question: How do you prove an agent audit log has not been tampered with?
-    answer: Chain each record to a hash of the previous one, which detects any edited field and any record removed from the middle. It does not detect truncation of the tail, so publish the head hash and the record count on a fixed cadence to a system under different credentials, and treat a head hash you cannot reproduce as an incident.
+    answer: Chain each record to a hash of the previous one, and store the exact bytes you hashed rather than re-deriving them from database columns, which do not round-trip. That detects any edited field and any record removed from the middle. It does not detect truncation of the tail, so publish the head hash and record count on a fixed cadence to a system under different credentials. It also cannot detect a false record appended by whoever holds the append privilege, which is why the component being audited should not be the component writing the records.
 ---
 
 ## TL;DR
@@ -72,7 +72,7 @@ The second half of the problem is quieter. That log line lives in the same index
 
 ## Step by step
 
-The path below builds one record, appends it to an append-only store, and runs the query an investigation actually runs. Every SQL statement in this guide was executed against PostgreSQL 17.11 in a container, and every output shown is real output from that run. Full runnable sources: `examples/govern-audit/schema.sql`, `examples/govern-audit/emit_record.py`, `examples/govern-audit/investigate.sql`, and `examples/govern-audit/verify_chain.py`.
+The path below builds one record, appends it to an append-only store, and runs the query an investigation actually runs. Every SQL statement in this guide was executed against PostgreSQL 17.11 in a container — as a non-superuser owner, through a login user holding only the writer role, and read back through a login user holding only the auditor role — and every output shown is real output from those runs. Full runnable sources: `examples/govern-audit/roles.sql`, `schema.sql`, `emit_record.py`, `export.sql`, `investigate.sql`, and `verify_chain.py`. Run `roles.sql` first and separately: it needs `CREATEROLE`, and `schema.sql` deliberately does not.
 
 ### 1. Write the question down before you write the schema
 
@@ -92,22 +92,22 @@ NIST SP 800-53 control AU-3 states the baseline for any audit record: it must co
 
 | Field | Why it exists — the investigation it enables |
 | --- | --- |
-| `record_id` | The record's own identity. Lets a later record, a case file, or a legal hold reference this exact event rather than "the refund one on Monday". |
+| `record_id` | Answers "which row are we talking about?" when three refunds on one invoice look alike. It is the handle an incident file, a legal hold, or a later record uses to name this event rather than "the refund one on Monday". |
 | `occurred_at` | When the emitter says it happened. Orders the story. Always UTC, RFC 3339, microsecond precision so two calls in the same millisecond still sort. |
-| `recorded_at` | When the store accepted it, stamped by the server. Answers "can I trust this ordering?" A gap means a bad clock or a late replay, and you want to know before you build a timeline on it. |
+| `recorded_at` | Answers "can I trust this ordering?" Stamped by the store, and — critically — *not writable by the emitter*, which takes a column-level grant rather than a `DEFAULT`. A gap against `occurred_at` means a bad clock or a late replay, and you want to know before you build a timeline on it. |
 | `agent_id` | Which non-human principal acted, versioned. Answers "is this agent still deployed, and what else did it do?" |
 | `principal_id` | The human whose authority was borrowed. Answers the first clause of the question. Explicit `NULL` for unattended work, never an absent field, because "there was no human" and "we failed to capture the human" are different answers. |
 | `principal_type` | Human, service, or scheduled job. Answers "should there have been a human here at all?" — a write attributed to a scheduled job at 3pm on a Tuesday is either normal or the whole incident. |
 | `grant_id` | The delegation or consent record that made this permissible. Answers "under what authority", by pointing at a document rather than asking an investigator to infer one. |
 | `resource` | What was acted on, as a stable path. Investigations start from the damaged thing far more often than from the verb, so this is the field you index for prefix search. |
-| `action` | What was attempted. Paired with `resource` it is the unit a policy is written against, which is what makes the decision field checkable. |
+| `action` | Answers "was this a read or a write?" — the first triage question on any resource, and the one that decides whether you are writing an incident report or an exposure notice. Paired with `resource` it is also the unit a policy is written against, which is what makes `decision` checkable. |
 | `arguments_sha256` | Digest of the complete argument set. Answers "was it *this* argument set?" — you reproduce the candidate from the source system and compare digests, without the log ever holding the values. |
 | `arguments_shape` | An allowlisted subset in the clear, everything else described but withheld. Answers most questions without an approval workflow to read raw arguments. |
 | `decision` | Allow or deny. Answers the fourth clause. Without it the trail contains only things that happened and none of the things that were stopped. |
 | `decision_reason` | Which rule fired, in words. Answers "why was this allowed?" A decision with no reason is unfalsifiable — you cannot tell a correct allow from a policy that allows everything. |
 | `policy_version` | Which ruleset evaluated it. Answers "was this allowed under the rules we had then, or the rules we have now?" Without it, every historical decision gets re-judged against today's policy, which is both unfair and wrong. |
 | `outcome` | Success, error, or blocked. Separate from `decision`, because an allowed call can still fail and a denied call has no downstream outcome at all. |
-| `outcome_detail` | Enough to classify the failure. Exception class, error code — never the exception message, which routinely contains the argument that caused it. |
+| `outcome_detail` | Answers "is this the same failure as the other forty, or a new one?" — the question that separates a flaky dependency from a systematic one. Exception class or error code only, never the exception message, which routinely contains the argument that caused it. |
 | `correlation_id` | One id per user-visible task, propagated to every call the task makes. Turns nine unrelated rows into one story, and it is the single field whose absence does the most damage. |
 | `parent_span_id` | Position within the task. Answers "what did the agent do immediately before this?", which is the question you ask when the action looks reasonable in isolation. |
 
@@ -203,7 +203,7 @@ Three details in that block do real work. `policy()` returns the reason on the a
 
 Commit the audit write separately from the business transaction. Sharing a transaction means a rollback erases the evidence that the work was attempted, and an attempted-then-rolled-back write is a case you very much want a record of.
 
-Running `examples/govern-audit/emit_record.py` produces one record per line. Here is the second one — the denial on `inv_88300`, the record that did not exist at all in the log from "The problem" — abbreviated to the fields that carry the answer, with the argument values withheld and fingerprinted:
+Running `examples/govern-audit/emit_record.py` produces one record per line. Here is the second one — the denial on `inv_88300`, the record that did not exist at all in the log from "The problem" — abbreviated to the fields that carry the answer, with the argument values withheld and fingerprinted. Run it exactly as written and `fingerprint_alg` reads `sha256-unkeyed`; the `hmac-sha256` below is what you get once `AUDIT_FINGERPRINT_KEY` is set, which is the only configuration you should ship:
 
 ```json
 {
@@ -216,6 +216,8 @@ Running `examples/govern-audit/emit_record.py` produces one record per line. Her
     "invoice_id": "inv_88300",
     "reason_code": "goodwill"
   },
+  "chain_id": "chain:emitter-1",
+  "chain_seq": 2,
   "correlation_id": "4bf92f3577b34da6a3ce929d0e0e4736",
   "decision": "deny",
   "decision_reason": "refund_ceiling: amount_cents exceeds delegated limit 50000",
@@ -233,15 +235,33 @@ Note the `correlation_id`. It is a [W3C Trace Context](https://www.w3.org/TR/tra
 
 Four mechanisms, in increasing order of what they buy and what they cost. Pick deliberately; picking all four is a legitimate answer and so is picking the first two.
 
-**Privileges.** The writer role holds `INSERT` and nothing else. The auditor role holds `SELECT` and nothing else. Neither owns the table.
+**Privileges.** The writer role may append and nothing else. The auditor role may read and nothing else. Neither owns the table. Grant `INSERT` **column by column**, and leave `recorded_at` out of the list:
 
 ```sql
-GRANT INSERT ON audit.agent_action TO agent_writer;
+GRANT INSERT (
+    record_id, occurred_at, agent_id, principal_id, principal_type, grant_id,
+    resource, action, arguments_sha256, arguments_shape,
+    decision, decision_reason, policy_version, outcome, outcome_detail,
+    correlation_id, parent_span_id,
+    model_id, prompt_version, tool_version, untrusted_input,
+    canonical_form, prev_hash, record_hash, chain_id, chain_seq
+) ON audit.agent_action TO agent_writer;
+
 GRANT SELECT ON audit.agent_action TO auditor;
-REVOKE UPDATE, DELETE, TRUNCATE ON audit.agent_action FROM agent_writer, auditor;
 ```
 
-*Buys:* the application cannot rewrite its own history — the failure that makes every other mechanism here moot. *Costs:* almost nothing, one extra role and a connection string. *Does not buy:* protection from anyone holding the owner or superuser role.
+The column list is the control; `DEFAULT clock_timestamp()` is not. A default says what happens when a column is *not* supplied. It says nothing about who may supply it. Under a table-level `GRANT INSERT` the writer can send its own `recorded_at`, and then both timestamps come from the same untrusted party, agree by construction, and the skew check in step 8 cheerfully endorses a fabricated timeline. Executed as a member of `agent_writer`:
+
+```text
+-- INSERT naming recorded_at
+ERROR:  permission denied for table agent_action
+-- the same INSERT with recorded_at omitted
+INSERT 0 1
+```
+
+*Buys:* the application cannot rewrite its own history, and cannot tell the store when things happened. *Costs:* almost nothing at runtime, plus one ongoing chore — adding a column means adding it to this grant, or every append starts failing. *Does not buy:* protection from anyone holding the owner or superuser role.
+
+Note what is *not* in that block: a `REVOKE UPDATE, DELETE, TRUNCATE`. PostgreSQL grants no table privileges to `PUBLIC`, so these roles never held them, and the revoke would be a no-op that reads like a control. Check the real state with `SELECT relacl FROM pg_class WHERE relname = 'agent_action'` rather than trusting a line that only looks defensive.
 
 **A trigger.** Defence in depth against a careless script run as the owner:
 
@@ -260,17 +280,50 @@ ERROR:  audit.agent_action is append-only (attempted TRUNCATE)
 
 *Buys:* accidents fail loudly instead of silently succeeding. *Costs:* a migration that legitimately needs to rewrite the table now needs an explicit, reviewable step to drop and recreate the trigger — which is a feature. *Does not buy:* anything against an attacker, since the owner can `DROP TRIGGER` and a superuser can `ALTER TABLE ... DISABLE TRIGGER`. Say so in your control documentation rather than letting a reader assume otherwise.
 
-**Hash chaining.** Each record carries a hash over all of its own fields plus the previous record's hash. `examples/govern-audit/verify_chain.py` walks the chain. Tested against a record with one field edited, and against an export with the first record removed:
+**Hash chaining.** Each record carries a hash over all of its own fields plus the previous record's hash. Two things about building one are not obvious, and both bite in production rather than in a demo.
+
+*Store the bytes you hashed.* The natural implementation hashes a canonical serialisation of the record, writes the columns, and later re-derives that serialisation from the columns in order to verify. It does not work, because a database is not a byte store — it is a value store, and it renders values on the way out. PostgreSQL prints `timestamptz` with trailing zeros stripped:
 
 ```text
-09086973-...: record_hash does not cover its own fields
-a93cf05a-...: prev_hash '3e77b29e...' does not match the previous record_hash None
-               -- a record was removed, reordered, or inserted
+in   2026-08-18T22:18:41.979180+00:00  ->  out  2026-08-18 22:18:41.97918+00
+in   2026-08-18T22:18:41.000000+00:00  ->  out  2026-08-18 22:18:41+00
 ```
 
-*Buys:* detection of any edited field and any record deleted from the middle, using only the data itself — no trusted third party, no special storage. *Costs:* a hash per write, and the discipline to actually run the verifier, since an unverified chain proves nothing. *Does not buy:* protection against truncation. Lopping off the last N records leaves a chain that verifies perfectly. Nor does it stop an attacker who can modify records from recomputing every hash from the edit forward.
+Re-serialise either of those and the hash changes. Roughly one timestamp in ten ends in a zero, so a verifier built this way reports tampering against a perfectly healthy store, on a schedule, forever — and an integrity control that cries wolf gets switched off, after which you have neither the control nor the alarm. So the schema carries `canonical_form text NOT NULL`, holding the exact string that was hashed, and `examples/govern-audit/export.sql` emits it verbatim instead of rebuilding it. The redundancy against the typed columns is the point: those columns are for querying, this one is the evidence. The verifier cross-checks a handful of stable fields between the two, so editing a column an investigator reads while leaving the hashed bytes alone is caught rather than silent.
 
-Both holes close the same way, and it is worth doing because it is cheap: publish the head hash and the record count it covers, on a fixed cadence, to a system under different credentials. Then a truncation is a head hash you cannot reproduce rather than a silence. That is the shape of the construction certificate transparency uses — [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162.html) describes the append-only property of a log as achieved with Merkle trees, "which can be used to efficiently prove that any particular instance of the log is a superset of any particular previous instance", with signed tree heads gossiped so no single operator can quietly rewrite history. You do not need a Merkle tree to get the useful half. You need the anchor.
+*A chain has one head, so it admits one writer.* Two emitters that read the same head compute the same `prev_hash`, and the fork they produce is indistinguishable from tampering when the verifier runs. There are two ways out and you must pick one: serialise every writer on a chain behind a lock, or give each emitter its own chain and anchor each head separately. The schema does both — one chain per emitter, with the head handed out by a `SECURITY DEFINER` function under a row lock held until the writer commits, so two processes that accidentally share a chain id still cannot fork it. That function earns its keep twice over: the writer holds no `SELECT` anywhere in the schema, so it cannot read the chain head it needs. It gets that one value and nothing else.
+
+The lock does what locks do. Two writers on one chain, the first sleeping 1.5 seconds before committing:
+
+```text
+('agent:A', 'got_link',  0.0,  1)
+('agent:A', 'committed', 1.51, 1)
+('agent:B', 'got_link',  1.32, 2)   <- blocked until A committed, then got seq 2
+('agent:B', 'committed', 1.32, 2)
+```
+
+A `BEFORE INSERT` trigger rejects any record that does not continue its chain, so a fork becomes a failed write rather than a verifier alert raised weeks later against records nobody can still explain:
+
+```text
+ERROR:  chain chain:normal forked: record claims prev_hash <NULL>, head is a1fce436...
+ERROR:  chain chain:normal out of order: record claims seq 7, expected 2
+```
+
+With that in place, `examples/govern-audit/verify_chain.py` walks an export. Tested against a record whose hashed bytes were edited, an export with the first record removed, and a queryable column edited while `canonical_form` was left intact:
+
+```text
+47771d95-...: record_hash does not cover canonical_form
+2007dff2-...: prev_hash '7439518d...' does not match the previous record_hash None
+              in chain 'chain:emitter-1' -- a record was removed, reordered, or inserted
+47771d95-...: column principal_id='user:someone-else@example.com' disagrees with
+              canonical_form 'user:ada@example.com'
+```
+
+*Buys:* detection of any edited field, any record removed from the middle, and any divergence between the queryable copy and the hashed bytes — using only the data itself, no trusted third party, no special storage. *Costs:* a hash per write, a lock per chain, one duplicated column, and the discipline to actually run the verifier, since an unverified chain proves nothing. *Does not buy:* three things, and the third is the one people miss.
+
+Truncation is undetectable — lopping off the last N records leaves a chain that verifies perfectly. An attacker who can modify records can recompute every hash from the edit forward. And, the important one, **anyone who can append can forge**. A well-formed record chained to the genuine head, describing an approval that never happened, verifies clean; appending is precisely what that role is permitted to do. Demonstrated against this schema as `agent_writer`, with a `decision_reason` of "FABRICATED: this call never happened", the verifier exits 0 and prints "chain intact". The role that can do this is the application — the component under audit. That is not a flaw in the chain. It is the structural reason the emitter should not be the thing it describes, which is the argument the scale section below picks up.
+
+The first two holes close the same way, and it is worth doing because it is cheap: publish the head hash and the record count it covers, on a fixed cadence, to a system under different credentials. Then a truncation is a head hash you cannot reproduce rather than a silence. That is the shape of the construction certificate transparency uses — [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162.html) describes the append-only property of a log as achieved with Merkle trees, "which can be used to efficiently prove that any particular instance of the log is a superset of any particular previous instance", with signed tree heads gossiped so no single operator can quietly rewrite history. You do not need a Merkle tree to get the useful half. You need the anchor. The third hole does not close with cryptography at all.
 
 **Immutable storage.** Object storage with a retention lock is the strongest option and has the sharpest cost. In Amazon S3 Object Lock, a compliance-mode object "can't be overwritten or deleted by any user, including the root user in your AWS account", its retention mode cannot be changed and its period cannot be shortened; AWS notes that "the only way to delete an object under the compliance mode before its retention date expires is to delete the associated AWS account". Governance mode is the softer variant, overridable by a caller holding `s3:BypassGovernanceRetention` who sends `x-amz-bypass-governance-retention:true`.
 
@@ -302,7 +355,7 @@ CREATE INDEX agent_action_agent_principal_time
     ON audit.agent_action (agent_id, principal_id, occurred_at DESC);
 ```
 
-Column order is not a detail. On a 200,000-row table in the container used for this guide, the same query returning the same 96 rows planned as an index scan reading 103 buffers in 0.37 ms with the index above, and 619 buffers in 2.96 ms against an otherwise identical index ordered `(occurred_at, agent_id, principal_id)` — the time-first index cannot use either equality column to narrow the scan, so it walks the whole day. Those are figures from one container on one machine and the absolute numbers mean nothing to you; the ratio and the buffer counts are the point, and they grow with your table.
+Column order is not a detail. On a 200,000-row table in the container used for this guide, the same query returning the same 96 rows planned as an index scan reading 103 buffers in 0.37 ms with the index above, and 619 buffers in 2.96 ms against an otherwise identical index ordered `(occurred_at, agent_id, principal_id)` — the time-first index cannot use either equality column to narrow the scan, so it walks the whole day. Those are figures from one container on one machine. What transfers is the shape, not the multiple: an index whose leading column is the range cannot use either equality column to narrow the scan, so it reads a whole time slice and discards most of it. How much that costs you depends on row width, selectivity, and physical correlation — measure it on your own data with `EXPLAIN (ANALYZE, BUFFERS)` rather than trusting a ratio from someone else's.
 
 Three more indexes earn their keep, and each maps to a question you will be asked:
 
@@ -324,7 +377,7 @@ CREATE INDEX agent_action_denials
 
 ### 8. Run the investigation
 
-Run it as the read-only auditor role, never as the writer:
+Run it with the auditor privileges and never the writer's — as a named human who is a member of the `auditor` role, adopting it with `SET ROLE auditor`. The role itself is `NOLOGIN` in `roles.sql` on purpose: reads of an audit store are themselves audit events, and you cannot log who read what if everyone shares one login.
 
 ```sql
 SELECT occurred_at, correlation_id, resource, action,
@@ -343,8 +396,8 @@ Real output from the run described above, abbreviated to the columns that carry 
 ```text
           occurred_at          |    resource    | decision | outcome | decision_reason
 -------------------------------+----------------+----------+---------+---------------------------------
- 2026-08-18 22:18:45.024579+00 | billing.refund | allow    | success | grant:refunds.write matched, ...
- 2026-08-18 22:18:45.024815+00 | billing.refund | deny     | blocked | refund_ceiling: amount_cents ...
+ 2026-08-18 23:01:17.835207+00 | billing.refund | allow    | success | grant:refunds.write matched, ...
+ 2026-08-18 23:01:17.840033+00 | billing.refund | deny     | blocked | refund_ceiling: amount_cents ...
 (2 rows)
 ```
 
@@ -363,7 +416,7 @@ SELECT agent_id,
  GROUP BY agent_id;
 ```
 
-`occurred_at` is claimed by the emitter; `recorded_at` is stamped by the server. Any row in `from_the_future`, or a `worst_lag` measured in minutes, means the timeline you were about to build is not sound. Discover that here, not in cross-examination.
+`occurred_at` is claimed by the emitter; `recorded_at` is stamped by the server. This query is only worth running because of the column-level grant in step 5 — under a table-level `GRANT INSERT` the writer supplies both values, they agree by construction, and a compromised emitter passes this check while lying about every timestamp in the window. Given the grant, any row in `from_the_future`, or a `worst_lag` measured in minutes, means the timeline you were about to build is not sound. Discover that here, not in cross-examination.
 
 ### 9. Decide retention on purpose
 
@@ -371,11 +424,11 @@ Retention is the field everyone leaves blank and then defaults to forever, which
 
 **Pressure toward keeping longer.** Investigations are retrospective by definition, and you do not control when one starts. Some agent misbehaviour is only visible as a pattern across a long window — a slow drift in what it approves, a resource it touched once in March that turns out to matter in September — so a window shorter than the pattern hides it completely. Disputes, contractual claims, and regulatory questions arrive on their own schedule rather than yours. A trail that begins after the incident is not a trail.
 
-**Pressure toward keeping less.** Every record is personal data about the human it names, and GDPR Article 5(1)(e) requires personal data to be kept in a form permitting identification "for no longer than necessary" for the purpose. Every record you hold is a record that can be breached, subpoenaed, or read by someone who did not need it. Storage costs money for the full period whether or not anyone reads it. And if you chose compliance-mode immutable storage, you cannot shorten the period after the fact — the choice is made once.
+**Pressure toward keeping less.** Every record is personal data about the human it names, and GDPR Article 5(1)(e) requires personal data to be kept in a form permitting identification of data subjects "for no longer than is necessary for the purposes for which the personal data are processed". Every record you hold is a record that can be breached, subpoenaed, or read by someone who did not need it. Storage costs money for the full period whether or not anyone reads it. And if you chose compliance-mode immutable storage, you cannot shorten the period after the fact — the choice is made once.
 
 How to reason about it rather than picking a round number: start from the longest realistic detection-to-investigation gap for the systems these agents touch, since a retention period shorter than that guarantees your worst incident is the one you cannot reconstruct. Then check that number against any sector rule that genuinely applies to you — financial recordkeeping and health records carry real statutory periods; general-purpose SaaS usually does not. Then tier it: full records including `arguments_shape` for the shorter window, and a reduced record — timestamps, both principals, resource, action, decision, outcome — for the longer one, which is enough to answer the four clauses at a fraction of the exposure.
 
-Do not expect the number to come from a certification. NIST SP 800-53 writes the control as retaining audit records for "[Assignment: organization-defined time period]" — the blank is the point, and it is the blank every framework leaves for you. The failure mode below covers what to do when somebody insists otherwise.
+Do not expect the number to come from a certification. NIST SP 800-53 writes the control as retaining audit records for "[Assignment: organization-defined time period **consistent with records retention policy**]". The blank is the point, and so is what it points at: your own retention policy. Where a framework does hand you a number it will be a sector rule rather than a general security standard — check whether one applies to you, and cite it if it does. The failure mode below covers what to do when somebody insists otherwise.
 
 One thing to settle with counsel before it comes up rather than during: an erasure request does not automatically empty your audit trail. GDPR Article 17(3) lists grounds on which the right to erasure does not apply, including compliance with a legal obligation and "the establishment, exercise or defence of legal claims". Whether your particular records fall under one of those is a legal question about your specific circumstances, not a technical one, and this guide is not the place it gets answered. What *is* your job is making the question answerable: know which fields in a record identify a person, and be able to produce every record naming a given principal — which the index in step 7 already gives you.
 
@@ -401,8 +454,13 @@ The honest summary: the first column is not a real option, and the choice betwee
 - [ ] No credential, in any form, appears in any field — checked by grepping a real export, not by reading the code.
 - [ ] `outcome_detail` carries the exception class, never `str(error)`.
 - [ ] Argument values are digested or fingerprinted, and low-entropy fields use a key held outside the audit store.
-- [ ] The audit store's writer role has `INSERT` only, and the service account running agents cannot `UPDATE`, `DELETE`, or `TRUNCATE` it.
+- [ ] The writer's `INSERT` is granted column by column and omits `recorded_at`; an insert naming it fails with `permission denied`.
+- [ ] The service account running agents cannot `UPDATE`, `DELETE`, or `TRUNCATE` the audit table — confirmed against `pg_class.relacl`, not against a `REVOKE` statement that may be a no-op.
+- [ ] The exact bytes that were hashed are stored, and the verifier reads those bytes rather than re-deriving them from typed columns.
+- [ ] The chain is verified against an export from the **store**, not only against the emitter's stdout — those are different code paths and only one of them is what you will have during an incident.
+- [ ] Writers on a single chain are serialised, or each emitter owns a chain and each chain's head is anchored separately.
 - [ ] The hash chain is verified on a schedule, and the head hash is anchored somewhere the store's operator does not control.
+- [ ] Your control documentation states that the chain cannot detect a false record appended by the writer, and names what does address that instead.
 - [ ] Audit writes commit in their own transaction, not the business transaction.
 - [ ] Timestamps are UTC and RFC 3339, and you run the emitter-versus-server skew query before trusting any timeline.
 - [ ] The correlation id is propagated to every downstream call, including calls into other services.
@@ -452,7 +510,7 @@ The honest summary: the first column is not a real option, and the choice betwee
 
 **Cause:** timestamps taken from local clocks, in local time, on hosts that drift. Clock synchronisation appears as a control in its own right alongside logging and monitoring in ISO/IEC 27001:2022 Annex A, and the reason is this one: every other logging control is worth less than you think if the times are not comparable.
 
-**Fix:** UTC everywhere, RFC 3339 everywhere, microsecond precision, `clock_timestamp()` on the server for `recorded_at`, and the skew query from step 8 run as the first step of every investigation. When skew is real, order by `recorded_at` and say in the report that you did and why.
+**Fix:** UTC everywhere, RFC 3339 everywhere, microsecond precision, `clock_timestamp()` on the server for `recorded_at` — with the column-level grant from step 5, or the server-side value is only a suggestion the writer can override — and the skew query from step 8 run as the first step of every investigation. When skew is real, order by `recorded_at` and say in the report that you did and why.
 
 ### The correlation id stops at the first hop
 
@@ -540,4 +598,5 @@ Primary sources for everything asserted above:
 - [RFC 8785, JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html) — a deterministic JSON serialisation so a digest taken in one runtime reproduces in another.
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/) — the `traceparent` header and the 32-hex-digit trace-id reused here as the correlation id.
 - [Locking objects with S3 Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html) — compliance versus governance retention modes, the versioning requirement, and the delete-marker behaviour of a version-less `DELETE`.
-- [PostgreSQL 17 CREATE INDEX](https://www.postgresql.org/docs/17/sql-createindex.html) — partial indexes and `text_pattern_ops` for prefix matching under a non-C collation.
+- [PostgreSQL 17 CREATE INDEX](https://www.postgresql.org/docs/17/sql-createindex.html) — partial indexes, and the index definition syntax used throughout.
+- [PostgreSQL 17 operator classes](https://www.postgresql.org/docs/17/indexes-opclass.html) — `text_pattern_ops`, and why prefix matching needs it under a non-C collation.
