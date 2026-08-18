@@ -31,7 +31,7 @@ faq:
   - question: Which Gmail OAuth scope should an AI agent use?
     answer: Start with https://www.googleapis.com/auth/gmail.readonly and add https://www.googleapis.com/auth/gmail.send only when the agent genuinely sends mail. Full access via https://mail.google.com/ is almost never justified.
   - question: Does Gmail access require a Workspace admin?
-    answer: Only domain-wide delegation across a Workspace organization requires admin approval; individual OAuth consent granted by a single user does not.
+    answer: Domain-wide delegation always needs a super admin. Individual OAuth consent usually does not, but a Workspace admin can block third-party apps or disable Gmail API access for the domain, and then every call fails with a domainPolicy 403.
   - question: Can the agent send email without being able to read the mailbox?
     answer: Yes. The gmail.send scope allows sending mail on the user's behalf without granting any read access to existing messages.
   - question: Why did my Gmail refresh token stop working after seven days?
@@ -44,7 +44,7 @@ faq:
 
 - Ship the agent with `https://www.googleapis.com/auth/gmail.readonly`, prove the workflow against a real mailbox, then widen. The reverse order does not survive a security review.
 - `https://mail.google.com/` grants read, compose, send, and permanent deletion of every message in the mailbox. An agent essentially never needs it.
-- Every Gmail scope that reads message content is a Google *restricted* scope: shipping to the public requires app verification plus an annual CASA security assessment. Put weeks, not days, on the calendar.
+- The Gmail scopes that read a mailbox — `gmail.readonly`, `gmail.modify`, `gmail.compose`, `gmail.metadata` — are Google *restricted* scopes: a public launch needs app verification, plus an annual CASA security assessment if the data can reach a third-party server. Put weeks, not days, on the calendar.
 - Per-user OAuth with a refresh token is the default. Service accounts with domain-wide delegation exist to skip user consent, which is exactly why reaching for them first is the wrong instinct.
 - Budget quota in units, not requests: listing costs 5, reading one message costs 20, sending costs 100, against 6,000 per user per minute and 1,200,000 per project per minute.
 
@@ -56,9 +56,9 @@ You are wiring an agent into a real mailbox — triage, drafting, extraction, es
 
 The default path is a trap that closes slowly. A tutorial hands you `https://mail.google.com/` because it makes every call work on the first try, and the agent ships. Six weeks later the same grant is still in place, and it now covers a mailbox that has accumulated a legal thread, a compensation discussion, and a customer's bank details in an attachment. The agent does not need any of that, but the mailbox does not know that — a single `messages.get` pulls a full thread body, every participant's address, and every attachment straight into a model's context window. Read [what actually breaks in production](/fail/) for the shape this takes once that context is logged, cached, or forwarded to a third-party inference endpoint.
 
-The capability side is worse than the exposure side. `https://mail.google.com/` includes permanent deletion. An agent holding that scope is one prompt injection away from destroying mail that has no undo, because permanent deletion under this scope bypasses the trash. Nobody chose that risk; it arrived attached to a convenient scope string.
+The capability side is worse than the exposure side. That same convenient scope carries permanent deletion, with no trash to recover from, so the agent is one prompt injection away from destroying mail that has no undo. Nobody chose that risk. It arrived attached to a scope string.
 
-Then there is the failure that wastes a week. The agent works perfectly for seven days and dies on the eighth with `invalid_grant`. That is not a bug in your refresh logic. It is Google's rule that an OAuth client with an external user type and a publishing status of Testing issues refresh tokens that expire seven days after consent. If you did not know the rule, you will look for it in the wrong place.
+Then there is the failure that wastes a week. The agent runs perfectly for seven days and dies on the eighth with `invalid_grant`, for every user at once. Nothing in the refresh logic is wrong; the expiry is a property of the OAuth client's publishing status, which is not where anyone looks first. Failure modes below has the mechanism and the fix.
 
 ## Step by step
 
@@ -96,7 +96,7 @@ Google classifies these Gmail scopes as restricted: `gmail.readonly`, `gmail.com
 - Any app that can move restricted data to or through a third-party server must pass a CASA security assessment, and must be reverified at least every 12 months. An agent that sends mailbox content to a hosted model is squarely in scope.
 - Google's Limited Use requirements constrain what you may do with the data afterwards, including restrictions on human review and on transferring it.
 
-There are real exemptions. Internal-only apps within a single Google Workspace organization, and apps limited to specific organizations via a domain-wide installation, do not go through public verification. Most internal agents live here. But an app left in Testing status to dodge verification is capped at 100 test users and hands you seven-day refresh tokens, which is not a production posture.
+There are real exemptions, and they are narrower than they look. An internal-only app is genuinely exempt: the project is owned by your Google Workspace or Cloud Identity organization, the consent screen is set to an Internal user type, and only people in that organization use it. Most internal agents live here. Domain-wide installation is a different and weaker exemption — an app that targets a single organization and always installs domain-wide skips *brand* verification, but Google states plainly that app verification is still required if the app uses restricted or sensitive scopes. Every Gmail scope that touches mail is one or the other, so a Workspace-targeted agent still needs to budget the time. And an app parked in Testing status to dodge the whole thing is capped at 100 test users and hands you seven-day refresh tokens, which is not a production posture.
 
 ### 4. Send the user through consent with PKCE
 
@@ -138,7 +138,10 @@ missing = sorted(set(SCOPES) - granted)
 if missing:
     raise SystemExit(f"user withheld: {', '.join(missing)}")
 
-refresh_token = token["refresh_token"]  # absent if a live grant already exists
+refresh_token = token.get("refresh_token")
+if refresh_token is None:
+    # Google omits it when the user already holds a live grant for this client.
+    raise SystemExit("no refresh_token: re-request with prompt=consent, or reuse the stored one")
 ```
 
 Store `refresh_token` encrypted, keyed by user, never in the same store as your application data and never in an environment variable that gets baked into an image. It is a standing grant on a human being's mailbox that survives process restarts, deploys, and your departure from the company.
@@ -181,6 +184,11 @@ def list_unread(token: AccessToken, max_results: int = 10) -> list[dict[str, str
 
 def get_message(token: AccessToken, message_id: str) -> dict:
     return call(token, "GET", f"/messages/{message_id}", params={"format": "full"})
+
+
+def get_thread(token: AccessToken, thread_id: str) -> dict:
+    """Every message in the conversation in one call. 40 quota units."""
+    return call(token, "GET", f"/threads/{thread_id}", params={"format": "full"})
 ```
 
 Base URL is `https://gmail.googleapis.com/gmail/v1/users/me`. `maxResults` defaults to 100 and caps at 500. Message bodies arrive base64url-encoded inside a nested MIME part tree, so decoding means walking `payload.parts` for the first `text/plain` node — `plain_text()` in the example file does exactly that.
@@ -248,11 +256,21 @@ Domain-wide delegation deserves the sharpest warning. It exists so an applicatio
 
 **Fix:** treat `invalid_grant` as terminal. Delete the stored token, mark the connection as needing re-consent, notify the user, and stop calling. A retry loop against a revoked grant is not just useless, it is the signature of an integration that ignores revocation, which is precisely what a reviewer will look for.
 
+### The user revokes consent halfway through a run
+
+**Symptom:** a run that started cleanly gets a 401 on its fourth or fortieth call, the refresh that follows returns `invalid_grant`, and the agent has already read six messages and sent one reply.
+
+**Cause:** revocation invalidates the tokens themselves, not just your ability to mint new ones, and it cascades — revoking one token revokes its counterpart, so the access token sitting in memory becomes worthless rather than running out its natural lifetime. Google also notes that after a successful revocation it can take some time before the revocation has full effect, which is exactly why this presents as a run that works and then does not: early calls succeed, a later one returns 401, and the refresh behind it returns `invalid_grant`. A revoked grant does not announce itself at the start of a run, and a 401 on its own is indistinguishable from an ordinary expiry until the refresh fails.
+
+**Fix:** make the transition explicit. Refresh once on the first 401, and if that refresh raises `invalid_grant`, stop the run there — do not continue with the messages you already have, do not retry the remaining work, and do not write partial results as though the task completed. Delete the stored token, mark the connection dead, and surface a re-consent prompt to the user. Wrap the whole run in the handler, not just the first call: in `examples/connect-gmail/gmail_agent.py` `main()` wraps the entire `run()` in the `GrantRevoked` handler, because a revocation between the list call and the third `get_message` is the normal case, not the edge case. Anything the agent already did before the revocation still happened and still belongs in your audit trail.
+
 ### A 403 you retried forever because it looked like throttling
 
 **Symptom:** the agent loops with exponential backoff against a 403 and never recovers, or it gives up on a genuine rate limit that a short backoff would have cleared.
 
 **Cause:** Gmail returns 403 for several unrelated conditions. `rateLimitExceeded` and `userRateLimitExceeded` are throttling and should be retried with backoff. `domainPolicy` means the Workspace admin disabled Gmail API access and no retry will help. A 403 carrying `"Request had insufficient authentication scopes."` means the token lacks the scope for that call — commonly a `messages.send` on a readonly grant.
+
+One caveat on that last one: Google's error guide documents token problems under 401 `authError` and does not list an insufficient-scope reason under 403, but the Gmail API returns the scope failure as a 403 in practice. Expect the 403, and do not build a scope check that only watches for 401.
 
 **Fix:** branch on the reason inside `error.errors[].reason`, not on the status code. Retry the two rate-limit reasons and 429 and 5xx; surface everything else immediately. The `_is_rate_limited` helper in `examples/connect-gmail/gmail_agent.py` shows the split.
 
@@ -292,7 +310,7 @@ Domain-wide delegation deserves the sharpest warning. It exists so an applicatio
 
 **Symptom:** no error at all. A prompt-log review shows third-party addresses, a salary figure, or an attachment filename that nobody intended to send to a model provider.
 
-**Cause:** `messages.get` with `format=full` returns the entire MIME tree. There is no scope that says "only the messages relevant to this task"; scope is per-mailbox, and relevance is your job.
+**Cause:** scope is per-mailbox and relevance is your job. There is no scope that says "only the messages relevant to this task", so a `format=full` read hands over everything step 7 described, and `threads.get` does it for the whole conversation.
 
 **Fix:** decide at the code boundary. Fetch `format=metadata` when headers suffice, extract only the `text/plain` part when you need a body, cap it by length, redact known patterns before the prompt, and never fetch attachment bytes speculatively. The [failure pillar](/fail/) covers how these bodies escape through logs and prompt caches once they are in the pipeline.
 
@@ -326,7 +344,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The runnable version is `examples/connect-gmail/list_unread.py`. The property that matters is not the shorter code — it is that the Gmail refresh token does not live in the agent process, so a compromised agent leaks a revocable gateway token instead of a standing grant on a mailbox. Connection names and method names are per-deployment, so run `afctl tools list` against your own gateway rather than copying `gmail_work` and `get_emails` on faith. What a layer like [Agentic Fabriq](https://agenticfabriq.com) buys you is the lifecycle, not the API call; everything above stays correct if you would rather own that lifecycle yourself.
+The runnable version is `examples/connect-gmail/list_unread.py`. The property that matters is not the shorter code — it is that the Gmail refresh token does not live in the agent process, so a compromised agent leaks a revocable gateway token instead of a standing grant on a mailbox. Connection names, method names, and response shapes are all per-deployment, so run `afctl tools list` against your own gateway rather than copying `gmail_work`, `get_emails`, or the `emails` response key on faith. What a layer like [Agentic Fabriq](https://agenticfabriq.com) buys you is the lifecycle, not the API call; everything above stays correct if you would rather own that lifecycle yourself.
 
 ## Further reading
 
@@ -338,7 +356,7 @@ Primary sources for everything asserted above:
 - [Restricted scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification) — verification, the CASA security assessment, annual reverification, and the exemptions.
 - [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy) — the Limited Use requirements on restricted scope data.
 - [Using OAuth 2.0 for web server applications](https://developers.google.com/identity/protocols/oauth2/web-server) — the authorization and token endpoints, `access_type=offline`, and the requirement to verify granted scopes.
-- [OAuth 2.0 for mobile and desktop apps](https://developers.google.com/identity/protocols/oauth2/native-app) — PKCE verifier and challenge rules, loopback redirects, and `https://oauth2.googleapis.com/revoke`.
+- [OAuth 2.0 for mobile and desktop apps](https://developers.google.com/identity/protocols/oauth2/native-app) — PKCE verifier and challenge rules, loopback redirects, `https://oauth2.googleapis.com/revoke`, the cascade from an access token to its refresh token, and the note that revocation can take some time to take full effect.
 - [Using OAuth 2.0 to access Google APIs](https://developers.google.com/identity/protocols/oauth2) — refresh token expiration causes, the seven-day Testing rule, and the 100-token limit.
 - [Gmail API usage limits](https://developers.google.com/workspace/gmail/api/reference/quota) — per-minute quota ceilings and the per-method unit costs.
 - [Handle Gmail API errors](https://developers.google.com/workspace/gmail/api/guides/handle-errors) — the 403 and 429 reason strings and the backoff guidance.

@@ -18,6 +18,7 @@ import http.server
 import os
 import secrets
 import sys
+import time
 import urllib.parse
 import webbrowser
 
@@ -73,10 +74,18 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
 
 
 def wait_for_callback(timeout_seconds: int = 300) -> dict[str, list[str]]:
+    """Serve requests until the callback arrives, or give up at the deadline.
+
+    handle_request() returns after server.timeout with nothing handled, so the
+    loop needs its own absolute deadline or the timeout is decorative.
+    """
     server = http.server.HTTPServer(("127.0.0.1", REDIRECT_PORT), _CallbackHandler)
     server.timeout = timeout_seconds
+    deadline = time.monotonic() + timeout_seconds
     try:
         while not _CallbackHandler.query:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"no OAuth callback within {timeout_seconds}s")
             server.handle_request()
     finally:
         server.server_close()

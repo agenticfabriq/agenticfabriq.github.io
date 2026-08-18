@@ -92,7 +92,9 @@ def _is_rate_limited(response: requests.Response) -> bool:
         return False
     try:
         errors = response.json()["error"].get("errors", [])
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, AttributeError):
+        # ValueError: not JSON. KeyError: no "error". AttributeError: "error"
+        # came back as a bare string, which some Google endpoints still do.
         return False
     return bool({error.get("reason") for error in errors} & RATE_LIMIT_REASONS)
 
@@ -132,6 +134,11 @@ def list_unread(token: AccessToken, max_results: int = 10) -> list[dict[str, str
 def get_message(token: AccessToken, message_id: str, fmt: str = "full") -> dict[str, Any]:
     """messages.get costs 20 quota units per call, four times a list page."""
     return call(token, "GET", f"/messages/{message_id}", params={"format": fmt})
+
+
+def get_thread(token: AccessToken, thread_id: str) -> dict[str, Any]:
+    """Every message in the conversation in one call. 40 quota units."""
+    return call(token, "GET", f"/threads/{thread_id}", params={"format": "full"})
 
 
 def header(message: dict[str, Any], name: str) -> str:
@@ -188,14 +195,8 @@ def send_reply(token: AccessToken, message: dict[str, Any], body_text: str) -> d
     )
 
 
-def main() -> int:
-    token = AccessToken(os.environ["GMAIL_REFRESH_TOKEN"])
-    try:
-        unread = list_unread(token, max_results=5)
-    except GrantRevoked as error:
-        print(f"re-consent required: {error}", file=sys.stderr)
-        return 2
-
+def run(token: AccessToken) -> int:
+    unread = list_unread(token, max_results=5)
     if not unread:
         print("nothing unread")
         return 0
@@ -208,12 +209,31 @@ def main() -> int:
         if files:
             print(f"    attachments in context: {', '.join(files)}")
 
+    # The whole conversation around the first unread message, 40 quota units.
+    thread = get_thread(token, unread[0]["threadId"])
+    print(f"thread {thread['id']} carries {len(thread.get('messages', []))} messages")
+
     # Uncomment once the grant includes gmail.send. On a readonly-only grant
     # this raises requests.HTTPError with a 403 and
     # "Request had insufficient authentication scopes."
-    # first = get_message(token, unread[0]["id"])
-    # send_reply(token, first, "Acknowledged. A human is picking this up.")
+    # send_reply(token, get_message(token, unread[0]["id"]),
+    #            "Acknowledged. A human is picking this up.")
     return 0
+
+
+def main() -> int:
+    token = AccessToken(os.environ["GMAIL_REFRESH_TOKEN"])
+    try:
+        # The handler wraps the entire run, not just the first call.
+        # Revocation mid-run is the normal case: revocation invalidates the
+        # access token too, so a later call 401s, the refresh behind it returns
+        # invalid_grant, and the right move is to abandon the run rather than
+        # finish it on partial data.
+        return run(token)
+    except GrantRevoked as error:
+        print(f"grant revoked, stopping run: {error}", file=sys.stderr)
+        print("delete the stored token and prompt the user to re-consent", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

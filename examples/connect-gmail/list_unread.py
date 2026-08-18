@@ -21,6 +21,9 @@ async def main() -> None:
             method="get_emails",
             parameters={"max_results": 10, "q": "is:unread"},
         )
+        # Connection name, method name, and response keys are all defined by
+        # your deployment. Check yours with `afctl tools list` rather than
+        # assuming "gmail_work", "get_emails", or the "emails" key below.
         for email in result.get("emails", []):
             print(email)
 
