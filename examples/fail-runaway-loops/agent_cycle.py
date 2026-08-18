@@ -11,6 +11,7 @@ the work, and refuse work whose history says you have already handled it.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,10 +33,12 @@ class DepthExceeded(Exception):
 class CallContext:
     """Travels with every agent-to-agent call. The whole fix lives in here.
 
-    `path` is the chain of agent ids that led to this call; `max_depth` is the
-    ceiling that catches a cycle three agents long that no pairwise check would
-    see. `root_run_id` is what ties the whole tree back to one user action in
-    your audit trail.
+    `path` is the chain of agent ids that led to this call, so any repeat --
+    including a three-agent cycle that comparing against the immediate caller
+    would miss -- is caught. `max_depth` covers what the path check cannot: a
+    chain of *distinct* agents that never repeats and never ends. See
+    distinct_chain(). `root_run_id` ties the whole tree back to one user action
+    in your audit trail.
     """
 
     root_run_id: str
@@ -71,7 +74,18 @@ def make_deferrer(peer_id: str):
     return agent
 
 
-def mutual_recursion(*, guarded: bool, hard_cap: int = 400) -> tuple[int, str]:
+def make_chain(next_id: str | None):
+    """An agent that hands the question one step further down a chain."""
+
+    def agent(registry: Registry, question: str, ctx: CallContext | None) -> str:
+        if next_id is None:
+            return "answered"
+        return registry.invoke(next_id, question, ctx)
+
+    return agent
+
+
+def mutual_recursion(*, guarded: bool) -> tuple[int, str]:
     registry = Registry()
     registry.agents["billing"] = make_deferrer("support")
     registry.agents["support"] = make_deferrer("billing")
@@ -87,6 +101,27 @@ def mutual_recursion(*, guarded: bool, hard_cap: int = 400) -> tuple[int, str]:
         # stack limit -- and only because the calls are synchronous. Across a
         # queue or an HTTP hop there is no stack, so there is no limit.
         return registry.calls, "RecursionError: stopped by the interpreter, not by you"
+    return registry.calls, "returned"
+
+
+def distinct_chain(length: int, *, max_depth: int = 8) -> tuple[int, str]:
+    """A chain of agents that never repeats, so the path check never fires.
+
+    This is the case the depth ceiling exists for. Every id on the path is
+    unique, so `agent_id in self.path` is false at every hop; only `max_depth`
+    stops it. A guard you claim catches something should be shown catching it.
+    """
+    registry = Registry()
+    ids = [f"agent_{i:02d}" for i in range(length)]
+    for index, agent_id in enumerate(ids):
+        nxt = ids[index + 1] if index + 1 < length else None
+        registry.agents[agent_id] = make_chain(nxt)
+    try:
+        registry.invoke(ids[0], "escalate this", CallContext("run_c3d4", max_depth=max_depth))
+    except DepthExceeded as exc:
+        return registry.calls, f"DepthExceeded: {exc}"
+    except CycleDetected as exc:  # pragma: no cover - ids are distinct by construction
+        return registry.calls, f"CycleDetected: {exc}"
     return registry.calls, "returned"
 
 
@@ -149,10 +184,14 @@ def echo_loop(*, tag_own_writes: bool, hard_cap: int = 500) -> tuple[int, str]:
 
 def main() -> None:
     calls, why = mutual_recursion(guarded=False)
-    print(f"two agents, no call context: {calls} invocations, {why}")
+    print(f"two agents, no call context:   {calls} invocations, {why}")
+    print(f"  (that count is sys.getrecursionlimit() showing through: {sys.getrecursionlimit()})")
 
     calls, why = mutual_recursion(guarded=True)
     print(f"two agents, call path carried: {calls} invocations, {why}")
+
+    calls, why = distinct_chain(20, max_depth=8)
+    print(f"20 distinct agents in a chain: {calls} invocations, {why}")
     print()
 
     writes, why = echo_loop(tag_own_writes=False)

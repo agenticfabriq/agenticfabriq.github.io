@@ -38,11 +38,11 @@ faq:
   - question: What is exponential backoff with full jitter?
     answer: "It is the retry delay AWS describes in its article on exponential backoff and jitter: sleep for a random duration between zero and min(cap, base * 2 ** attempt), where attempt starts at zero for the first retry. The randomness is the point. Without it, every client that failed at the same moment retries at the same moment and rebuilds the burst that caused the failure."
   - question: How do I stop an AI agent from running up a large API bill?
-    answer: Give every run a hard budget over four things at once - provider calls, tokens, spend in your own currency, and wall clock - and check all four before each attempt rather than after. Add a per-user daily spend cap enforced by reserving the money before the call, since a per-run cap does nothing about a thousand runs.
+    answer: Give every run a hard budget over four things at once - provider calls, tokens, spend in your own currency, and wall clock - and check all four before each attempt rather than after. Add a per-user daily spend cap, since a per-run cap does nothing about a thousand runs. Reserve against that cap before the call, then either reconcile it to the real cost or release it, because a reservation for a call that never happened fills the cap with money you never spent.
   - question: Do idempotency keys make it safe to retry an agent's writes?
-    answer: Only if the key identifies the operation rather than the attempt. A key generated fresh on each retry deduplicates nothing. Derive it from the operation and its parameters, and check what your provider does with a reused key - Stripe, for example, stores the first response for 24 hours and replays it, and errors if the parameters differ.
+    answer: Only if the key identifies the operation rather than the attempt. A key generated fresh on each retry deduplicates nothing. Derive it from the operation and its parameters, and check what your provider does with a reused key - Stripe, for example, stores the first response for 24 hours and replays it, and errors if the parameters differ. Check the exceptions too, because Stripe stores nothing when parameters fail validation, so a malformed write can be corrected and retried under the same key.
   - question: When should an agent use a circuit breaker instead of just retrying?
-    answer: Use both, for different failures. Backoff handles a request that failed once; a circuit breaker handles a dependency that is failing for everyone, by refusing to call it at all after a threshold of consecutive failures. Trip it only on timeouts, 429s, and 5xx responses, never on a 400 or a 401, which mean the agent's own request is wrong.
+    answer: Use both, for different failures. Backoff handles a request that failed once; a circuit breaker handles a dependency that is failing for everyone, by refusing to call it at all after a threshold of consecutive failures. Trip it only on transport errors, 408s, 429s, and server errors (500, 502, 503, 504), never on a 400 or a 401, which mean the agent's own request is wrong.
   - question: How fast should an agent kill switch take effect?
     answer: As fast as your cache TTL, and it must never require a deploy. Read a stop flag keyed by agent id and user id from a store outside the deploy artifact before every tool call, cache it for a few seconds, and accept that the TTL is your worst-case reaction time.
 ---
@@ -57,7 +57,7 @@ faq:
 
 ## Who this is for
 
-You run an agent that calls external APIs on a schedule or on user demand, and you have either just received a surprising invoice, a throttling alert, or an email from a partner about your request volume — or you would like to not receive one. Everything here is provider-neutral and runs offline, so you can reproduce each failure before it reproduces itself in production. Skip this if your agent makes a fixed, small number of calls per run with no retry logic and no write path: your blast radius is already bounded and the machinery below is overhead.
+You run an agent that calls external APIs on a schedule or on user demand, and you have either just received a surprising invoice, a throttling alert, or an email from a partner about your request volume — or you would like to not receive one. Everything here is provider-neutral, and every example except the closing Agentic Fabriq one runs offline against a simulated provider, so you can reproduce each failure before it reproduces itself in production. Skip this if your agent makes a fixed, small number of calls per run with no retry logic and no write path: your blast radius is already bounded and the machinery below is overhead.
 
 ## The problem
 
@@ -96,6 +96,8 @@ A budget guessed from taste is either so loose it never fires or so tight it kil
   provider calls per run  p50=52 p95=76 p99=76 max=76
   cost per run p99        $0.6840
   wall clock per run p99  9.12s
+  derived budget          RunBudget(max_provider_calls=152, max_tokens=136800, max_cost_usd=Decimal('1.3680'), max_wall_clock_seconds=120.0)
+  alert threshold         76 calls per run
 ```
 
 Then derive. The alert threshold goes at p99, so a regression pages someone. The hard budget goes at roughly twice p99, far enough above the alert that an unusually large queue is not killed and far enough below a runaway that the provider never notices:
@@ -111,6 +113,8 @@ budget = RunBudget(
 ```
 
 Three of those four come off the measured distribution. Wall clock does not, and pretending otherwise is a mistake worth naming: a healthy run never backs off, so its duration tells you nothing about how long a legitimate run that hits throttling should be allowed to take. Set the wall-clock ceiling from how long the answer is still worth having, and treat it as the last wall rather than the first.
+
+One caveat on the derivation above, since the example takes a shortcut you should not. Deriving tokens and cost from `calls_p99` makes all three move together, so in this demo `stopped_by` can only ever report `provider_calls`. That is fine for a demonstration and wrong for production: a price change, a longer prompt, or a model swap moves cost without moving call count, which is the entire reason cost is a separate limit. Derive it from actual per-call billing, and let the three limits disagree.
 
 ### 2. Collapse retries to one layer
 
@@ -201,7 +205,7 @@ Thresholds worth starting from: `failure_threshold=5` consecutive dependency fai
 
 Two decisions matter more than the numbers.
 
-**What counts as a failure.** Only outcomes that mean *the dependency is sick*: timeouts, connection resets, `429`, and `5xx`. A `400` or `422` means the agent built a bad request; a `401` means the credential is wrong; a `403` means it lacks permission. Retrying any of those burns budget, and opening a breaker on them hides a code bug behind a plausible-looking outage. Fowler says the same thing about the pattern in general — "Not all errors should trip the circuit, some should reflect normal failures and be dealt with as part of regular logic" — and for an agent the list of normal failures is longer than usual, because the model generates the request. `is_dependency_failure()` in `guardrails.py` makes the split, and the self-check asserts that a 400 and a 401 do not trip it.
+**What counts as a failure.** Only outcomes that mean *the dependency is sick*: connection resets, `408`, `429`, `500`, `502`, `503`, and `504`. Not `5xx` as a class — a `501 Not Implemented` will not become implemented while you back off, and a `505` is a protocol disagreement. A `400` or `422` means the agent built a bad request; a `401` means the credential is wrong; a `403` means it lacks permission. Retrying any of those burns budget, and opening a breaker on them hides a code bug behind a plausible-looking outage. Fowler says the same thing about the pattern in general — "Not all errors should trip the circuit, some should reflect normal failures and be dealt with as part of regular logic" — and for an agent the list of normal failures is longer than usual, because the model generates the request. `is_dependency_failure()` in `guardrails.py` makes the split, and the self-check asserts that a 400 and a 401 do not trip it.
 
 **Where the breaker lives.** One breaker per (dependency, credential) pair, shared across the worker pool if your architecture allows. Forty processes each holding a private in-memory breaker need forty times the failures before anything trips, which is a breaker that has never once fired.
 
@@ -209,13 +213,14 @@ What the agent does when the breaker is open is the part usually left out. It mu
 
 ```text
 == circuit breaker: dependency down for 200s, agent polls every 5s ==
+  outcome: completed
   logical_calls: 60
   provider_calls: 33
   short_circuited: 36
   succeeded: 23
   breaker_state: closed
-  transitions: ['open', 'half_open', 'open', 'half_open', 'open', 'half_open',
-                'open', 'half_open', 'open', 'half_open', 'open', 'half_open', 'closed']
+  transitions: open, half_open, open, half_open, open, half_open, open,
+    half_open, open, half_open, open, half_open, closed
 ```
 
 Sixty logical calls produced 33 requests instead of the 240 that four attempts each would have produced, the breaker probed once per reset timeout while the outage lasted, and it closed on its own when the dependency came back.
@@ -232,8 +237,18 @@ An idempotency key is the control that makes retrying a write safe. It is worth 
 - Keys are pruned after at least 24 hours, and a key reused after pruning "generates a new request".
 - Keys belong on `POST`. Stripe says not to send them on `GET` and `DELETE`, which "are idempotent by definition" in its API.
 - Rate limiting runs *before* the idempotency layer, so a `429` under a key is not stored and can produce a different result on the next attempt.
+- **The "regardless of whether it succeeds or fails" rule has an exception, and it is the one that matters most to an agent.** Stripe stores a result only once an endpoint has begun executing: "If incoming parameters fail validation, or the request conflicts with another request that's executing concurrently, we don't save the idempotent result because no API endpoint initiates the execution. You can retry these requests."
 
-`examples/fail-runaway-loops/fake_provider.py` implements all of that server-side, which is what lets the client examples be tested rather than asserted.
+That last bullet is worth dwelling on. A `400` from a *failed business rule* is stored and replayed forever, so a fresh key is the only way forward. A `400` from *parameter validation* is not stored at all, so the caller can fix the parameters and retry under the same key. Confusing the two is how a recoverable mistake becomes permanent — and in an agent system the malformed write is routine rather than exceptional, because the model writes the request body:
+
+```text
+the model omits amount_cents, then the agent fixes it and retries the same key
+  attempt 0: 400 invalid_request_error: invoice and amount_cents required
+  attempt 1: 200 (executed) {'id': 'ch_0001', 'invoice': 'inv_2026_0042', 'amount_cents': 12900}
+  -> charges committed: 1
+```
+
+If your provider's idempotency layer does not make that distinction, the practical consequence is that your agent needs a new key after any `4xx`. Find out which behaviour you have before you rely on either. `examples/fail-runaway-loops/fake_provider.py` implements every bullet above server-side, validation exception included, which is what lets the client examples be tested rather than asserted.
 
 The client-side rule that actually decides whether any of it helps: **the key must identify the operation, not the attempt.** This is the one people get wrong, and the wrong version looks completely correct in review — a `uuid.uuid4()` generated inside the retry loop is unique, random, and useless. Run `examples/fail-runaway-loops/duplicate_writes.py`, where every client sends the same charge, loses the first response in transit, and retries once:
 
@@ -311,7 +326,42 @@ def reserve(self, user_id: str, day: str, amount: Decimal) -> None:
 
 Charging after the response means N concurrent workers can each pass the check and each then spend, so the cap is exceeded by a factor of N. In production this is a row per `(user, day)` and an atomic `UPDATE ... SET reserved = reserved + $1 WHERE reserved + $1 <= cap` that returns zero rows when the cap is hit — see [connecting an agent to a database](/connect/databases/) for how to hold that kind of state without giving the agent a way around it.
 
-Order of operations in the governed client is kill switch, then budget, then breaker, then the call. The kill switch is free and must win over everything; the budget is local and must be checked before anything is spent; the breaker decides whether the call is worth making; only then does anyone touch the network.
+**A reservation you do not release is a leak, and the short-circuit path is where it leaks.** Reserving is the easy half. The other half is that every path which decides not to spend has to give the promise back, and the dangerous path is not an exception you were expecting — it is the circuit breaker refusing the call *after* the reservation is taken. That happens hundreds of times in a row during precisely the outage the cap exists to survive, so a missing release fills a user's daily cap with money that was never spent, and the cap then fires in the middle of the incident. A guardrail that manufactures its own second outage is worse than no guardrail, because you will spend the incident looking for a spend that does not exist.
+
+So the reservation is bracketed. Every attempt either reconciles it against what the call actually cost or hands it back untouched:
+
+```python
+if self.daily is not None:
+    self.daily.reserve(self.user_id, self.day, cost.usd)
+
+settled = False
+try:
+    self.breaker.before_call()          # may raise CircuitOpen, having spent nothing
+    ...                                 # the request
+    actual_usd = cost.usd
+    if response is not None and response.status in REFUSED_STATUSES:
+        actual_usd = cost.refused_usd   # a 429 is a request you paid for, unserved
+    self.ledger.spend(tokens=cost.tokens, cost_usd=actual_usd)
+    if self.daily is not None:
+        self.daily.reconcile(self.user_id, self.day, cost.usd, actual_usd)
+    settled = True
+finally:
+    if not settled and self.daily is not None:
+        self.daily.release(self.user_id, self.day, cost.usd)
+```
+
+Two consequences worth stating. The reservation is the *worst case*, because you have to reserve before you know; reconciling swaps it for the real figure afterwards, which is what stops a throttled hour from eating a whole day's cap on calls that were refused. And `release()` raises rather than clamping at zero if it is asked to give back more than was reserved, because a silent clamp there means a double-release has quietly stopped the cap from holding. Here is the arithmetic, twenty calls into an already-open breaker:
+
+```text
+== reservations: 20 calls into an open breaker ==
+  short_circuited: 20
+  provider_calls: 0
+  run_ledger_calls: 0
+  daily_spend_usd: 0.0000
+  daily_cap_usd: 100.0000
+```
+
+Order of operations in the governed client is kill switch, then budget, then breaker, then the call. The kill switch is free and must win over everything; the budget is local and must be checked before anything is spent; the breaker decides whether the call is worth making; only then does anyone touch the network. Note where that puts the reservation — between two things that can still refuse — which is why the bracket above is not optional.
 
 ### 7. Wire the kill switch
 
@@ -352,14 +402,14 @@ First, ungoverned: a client with two nested retry loops of three attempts each, 
 
 ```text
 == ungoverned: same broken planner, naive retries, no budget ==
-  outcome: provider disabled the integration: this integration has been disabled for abuse
+  outcome: provider disabled the integration: this integration has been disabled for abuse; contact support
   provider_calls: 241
   rate_limited: 60
   forbidden: 1
   charges_committed: 160
   distinct_invoices: 25
-  elapsed: 88.92
-  cost_usd: 2.169
+  elapsed: 88.92s
+  cost_usd: 2.1690
 ```
 
 The run did not end because the agent finished or because anything in your code noticed. It ended because the provider revoked the integration. Along the way it committed 160 charges against 25 distinct invoices.
@@ -375,8 +425,8 @@ Now the same broken agent inside the budget from step 1:
   charges_committed: 25
   distinct_invoices: 25
   idempotent_replays: 104
-  elapsed: 76.88
-  cost_usd: 1.368
+  elapsed: 76.88s
+  cost_usd: 1.3085
   stopped_by: provider_calls
 ```
 
@@ -392,14 +442,14 @@ To see the other shapes stopped the same way, `examples/fail-runaway-loops/pagin
 | Backoff plus circuit breaker and a run budget | The default for a single service that owns its credential. Everything in the step-by-step above. | One run, bounded on four axes. Still per-process unless the breaker and the daily ledger are shared. | Only if the daily spend ledger is shared storage. In-memory, it is per-replica and the cap is really N times the cap. | A few days, plus a shared store for the ledger and the kill-switch flag, plus the discipline to keep retries in one layer. |
 | A broker enforcing quotas centrally | Many agents, many users, more than one team, or a credential shared across services. Also the only option that makes "stop this agent for this user" a single operation. | The fleet. A quota at the routing point bounds every caller, including the replica somebody deployed without telling you. | Native, because the broker sees the user on every call and can price and cap per user. | A dependency in the request path, its own availability budget, and a policy model to maintain. The cost is up front, not in the incident. |
 
-The honest comparison is that the middle row is where most teams should be, and the third row is what the middle row turns into once there are two services and a shared credential. The failure that pushes people over is always the same: a per-process budget looks like a fleet budget until the day someone scales the deployment to forty replicas and the ceiling silently multiplies by forty.
+The honest comparison is that the middle row is where most teams should be, and the third row is what the middle row turns into once there are two services and a shared credential. The trigger is rarely a decision. It is a capacity change, a second team, or a staging environment pointed at the production credential — none of which anybody reviews as a change to a limit, which is exactly why the limit stops holding without anybody noticing.
 
 ## Checklist
 
 - [ ] Exactly one layer in the call path retries. You have grepped for retry decorators, SDK retry configuration, and `for attempt in range(...)` and can name the single survivor.
 - [ ] Backoff is `random_between(0, min(cap, base * 2 ** attempt))`, and a test asserts the delay never exceeds the ceiling and never goes below zero.
 - [ ] `Retry-After` is parsed for both RFC 9110 forms — `delay-seconds` and `HTTP-date` — with a `^[0-9]+$` test rather than `str.isdigit()`, and is treated as a floor with jitter added above it.
-- [ ] The retry classifier retries `408`, `429`, `5xx`, and transport errors, and nothing else. A `400`, `401`, or `403` is surfaced immediately.
+- [ ] The retry classifier retries transport errors, `408`, `429`, `500`, `502`, `503`, and `504`, and nothing else. A `400`, `401`, or `403` is surfaced immediately, and so is a `501`, which will not become implemented while you wait.
 - [ ] A circuit breaker wraps each dependency, trips on consecutive dependency failures only, and is shared across the worker pool rather than held per process.
 - [ ] When the breaker is open the agent fails the step, does not queue the work, and does not treat it as retryable inside the same run.
 - [ ] Every write carries an idempotency key derived from the operation and a canonical hash of its parameters, never generated inside the retry loop.
@@ -407,7 +457,8 @@ The honest comparison is that the middle row is where most teams should be, and 
 - [ ] You have confirmed against your provider's own documentation how long it stores idempotency results and what it does when a key is reused with different parameters.
 - [ ] Each run has a hard limit on provider calls, tokens, spend, and wall clock, and every retry counts against all four.
 - [ ] Budget checks run before each attempt, and the per-request timeout is bounded by the run's remaining time.
-- [ ] A per-user daily spend cap is reserved before the call and reconciled after, in shared storage rather than process memory.
+- [ ] A per-user daily spend cap is reserved before the call, reconciled to the real cost after it, and released on every path that never reaches the provider — including the circuit breaker short-circuiting. A test asserts the released case.
+- [ ] That cap lives in shared storage rather than process memory.
 - [ ] Budget numbers were derived from a recorded distribution of healthy runs, and you can name the p99 they came from.
 - [ ] Alerts exist on tool calls per run, 429 rate, and cost per run, each with a threshold traceable to that baseline.
 - [ ] Metrics carry `run_id`, `agent_id`, `user_id`, and `tool` labels, so an alert can name the user to stop.
@@ -446,7 +497,7 @@ The honest comparison is that the middle row is where most teams should be, and 
 
 **Symptom:** either a dependency is down for twenty minutes and the breaker in your dashboard has never left closed, or the breaker is open and the dependency is provably healthy.
 
-**Cause:** scope, or classification. A breaker held in process memory across 40 replicas needs 40 × `failure_threshold` failures before anything happens fleet-wide, so it effectively never fires. Classification is the other half: counting a `400` or `401` as a dependency failure opens the breaker on a bug in the agent's own request building, which then presents as an outage nobody can find.
+**Cause:** scope, or classification. Scope is the multiplication from step 4 — a breaker held in process memory never sees enough of the fleet's failures to trip. Classification is the other half: counting a `400` or `401` as a dependency failure opens the breaker on a bug in the agent's own request building, which then presents as an outage nobody can find.
 
 **Fix:** one breaker per (dependency, credential), shared across the pool. Trip only on transport errors, `408`, `429`, and `5xx`, and assert that in a test — the self-check in `guardrails.py` asserts that a 400 and a 401 do not count. Export the state as a metric so "the breaker is open" is something you can see rather than infer.
 
@@ -462,9 +513,18 @@ The honest comparison is that the middle row is where most teams should be, and 
 
 **Symptom:** a clean upward ramp in agent invocations with no errors at all. Traffic is well-formed and well-paced, so no rate limiter objects.
 
-**Cause:** agent A treats agent B as the authority on a question, and B treats A the same way. Nothing in either agent is wrong on its own. Synchronous in-process calls end in a `RecursionError` — in `examples/fail-runaway-loops/agent_cycle.py` the unguarded version stops after 499 invocations, but that number is a property of the interpreter's recursion limit and not of your system. Across a queue or an HTTP hop there is no stack and therefore no limit at all.
+**Cause:** agent A treats agent B as the authority on a question, and B treats A the same way. Nothing in either agent is wrong on its own. Synchronous in-process calls end in a `RecursionError` — in `examples/fail-runaway-loops/agent_cycle.py` the unguarded version stops after 499 invocations, but that number is `sys.getrecursionlimit()` showing through, not a property of your system — the file prints the limit next to the count so a reader who gets a different number knows why. Across a queue or an HTTP hop there is no stack and therefore no limit at all.
 
-**Fix:** carry a call context with every agent-to-agent invocation, holding the chain of agent ids that led here, a maximum depth, and the root run id. Refuse the call if your own id is already on the path — checking only the immediate caller misses a three-agent cycle, so check the whole path. Keep the depth ceiling as well, because it catches the case the path check cannot: a chain of distinct agents that never repeats and never ends. Guarded, the same demo stops after 3 invocations with `CycleDetected: billing -> support -> billing`. The root run id is also what lets an audit trail tie the whole call tree back to one user action; the [governance pillar](/govern/) covers that attribution problem in general.
+**Fix:** carry a call context with every agent-to-agent invocation, holding the chain of agent ids that led here, a maximum depth, and the root run id. Refuse the call if your own id is already on the path — checking only the immediate caller misses a three-agent cycle, so check the whole path. Keep the depth ceiling as well, because it catches the case the path check cannot: a chain of distinct agents that never repeats and never ends. `agent_cycle.py` runs both, so neither guard is claimed without being shown catching something:
+
+```text
+two agents, no call context:   499 invocations, RecursionError: stopped by the interpreter, not by you
+  (that count is sys.getrecursionlimit() showing through: 1000)
+two agents, call path carried: 3 invocations, CycleDetected: billing -> support -> billing
+20 distinct agents in a chain: 9 invocations, DepthExceeded: depth 9 exceeds 8
+```
+
+The root run id is the third field in that context, and it is what lets an audit trail tie the whole call tree back to one user action; [audit trails for agent actions](/govern/audit/) covers that attribution problem in general.
 
 ### The agent triggers itself through its own webhook
 
@@ -486,9 +546,9 @@ The honest comparison is that the middle row is where most teams should be, and 
 
 Everything above bounds one process. That is the ceiling on the do-it-yourself version, and it is worth being blunt about where it stops.
 
-The run budget in `guardrails.py` is a Python object. Scale the deployment to forty replicas and you have forty budgets, and the fleet's actual ceiling is forty times what you configured — silently, on a routine capacity change nobody reviewed as a policy decision. The circuit breaker has the same problem in reverse: forty private breakers need forty times the failures before anything trips. The daily spend ledger has to become a row with an atomic conditional update, and something has to own that row. The kill switch needs a store, a write path an on-call engineer can reach at 3am, and a granularity model. And every one of those has to be reimplemented when the second team ships the second agent against the same credential, or the ceilings do not compose.
+The run budget in `guardrails.py` is a Python object. Scale the deployment to forty replicas and you have forty budgets, and the fleet's real ceiling is forty times the number you configured — the same scope arithmetic that step 4 described for the breaker, applied to money. The daily spend ledger has to become a row with an atomic conditional update, and something has to own that row. The kill switch needs a store, a write path an on-call engineer can reach at 3am, and a granularity model. And every one of those has to be reimplemented when the second team ships the second agent against the same credential, or the ceilings do not compose.
 
-The pattern that fixes it is not a better library. It is moving enforcement to the point where the calls actually route. If every agent reaches the provider through one path, the quota is a single counter rather than forty, per-user fairness is available because the caller's identity is on every request, and stopping one agent for one user is one write to one place rather than a deploy to every service that might be involved.
+The pattern that fixes it is not a better library. It is moving enforcement to the point where the calls actually route. If every agent reaches the provider through one path, the quota is a single counter that does not care how many replicas you run, per-user fairness is available because the caller's identity is on every request, and stopping one agent for one user is one write to one place rather than a deploy to every service that might be involved.
 
 That routing point is what [Agentic Fabriq](https://agenticfabriq.com) is: agents call named connections through the control layer instead of holding credentials and calling providers directly, policy is evaluated per request, and every call is attributed to an agent and the user it acted for. The consequence that matters here follows from the architecture rather than from any particular feature: because the agent never holds the provider credential, a call the layer declines is a call that does not reach the provider — including from the replica somebody scaled up last week and nobody is tracking. That is the property a per-process budget can never have. What your own gateway exposes on top of it — per-agent quotas, per-user quotas, a stop flag, and their exact semantics — is deployment configuration, so read it off your dashboard and `afctl agents list` rather than assuming it from this page.
 
@@ -525,9 +585,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The runnable version is `examples/fail-runaway-loops/fabriq_quotas.py`. Two things it deliberately does not do. It does not drop the idempotency key: routing a write through a layer does not make the write idempotent, the key still has to identify the operation rather than the attempt, and it still has to reach the downstream provider. And it does not assume the response shape — connection names, method names, quota rejection payloads, and result keys are per-deployment, so run `afctl tools list` against your own gateway and branch on what it prints rather than on `billing_prod` or `create_charge`.
+The file is `examples/fail-runaway-loops/fabriq_quotas.py` — the one example in this guide that is not runnable offline, since it needs the SDK, a token, and a gateway to talk to. Two things it deliberately does not do. It does not drop the idempotency key: routing a write through a layer does not make the write idempotent, the key still has to identify the operation rather than the attempt, and it still has to reach the downstream provider. And it does not assume the response shape — connection names, method names, quota rejection payloads, and result keys are per-deployment, so run `afctl tools list` against your own gateway and branch on what it prints rather than on `billing_prod` or `create_charge`.
 
-The parts that stay yours either way are the parts a routing layer cannot see: whether your planner has a checkable success predicate, whether your pagination stops on the cursor's value, and whether two of your agents defer to each other. A quota bounds the damage from those bugs. It does not fix them. What a layer like [Agentic Fabriq](https://agenticfabriq.com) removes is the fleet-arithmetic problem — one counter instead of forty, one kill switch instead of a deploy — and everything in the step-by-step remains correct if you would rather run those counters yourself.
+The parts that stay yours either way are the parts a routing layer cannot see: whether your planner has a checkable success predicate, whether your pagination stops on the cursor's value, and whether two of your agents defer to each other. A quota bounds the damage from those bugs. It does not fix them. What a layer like [Agentic Fabriq](https://agenticfabriq.com) removes is the scope arithmetic — one counter regardless of replica count, one kill switch instead of a deploy — and everything in the step-by-step remains correct if you would rather run those counters yourself.
 
 ## Further reading
 

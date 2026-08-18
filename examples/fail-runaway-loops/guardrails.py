@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -195,13 +196,21 @@ class RunBudget:
 
 @dataclass
 class DailySpendLedger:
-    """Per-user spend for the day, reserved before the call and reconciled after.
+    """Per-user spend for the day: reserve, then either reconcile or release.
 
     Reserve-then-reconcile is not pedantry. Charging after the response means N
     concurrent workers can each pass the check and each then spend, so the cap
     is exceeded by a factor of N. In production this is a row per (user, day)
     and an atomic `UPDATE ... SET reserved = reserved + $1 WHERE reserved + $1
     <= cap` that returns zero rows when the cap is hit.
+
+    The half that is easy to forget is `release()`. A reservation is a promise
+    to spend, and every path that decides not to spend has to take the promise
+    back. The dangerous one is not an exception you expected -- it is the
+    circuit breaker short-circuiting after the reservation is taken, because
+    that happens hundreds of times in a row during exactly the outage the cap
+    exists to survive. A leaked reservation turns the daily cap into a second
+    outage of your own manufacture.
     """
 
     cap_usd: Decimal
@@ -214,9 +223,23 @@ class DailySpendLedger:
             raise BudgetExhausted("daily_spend_usd", self.cap_usd, current + amount)
         self.spent[key] = current + amount
 
-    def reconcile(self, user_id: str, day: str, reserved: Decimal, actual: Decimal) -> None:
+    def release(self, user_id: str, day: str, amount: Decimal) -> None:
+        """Hand back a reservation for a call that never reached the provider."""
         key = (user_id, day)
-        self.spent[key] = self.spent.get(key, Decimal("0")) - reserved + actual
+        remaining = self.spent.get(key, Decimal("0")) - amount
+        if remaining < 0:
+            # Releasing more than was reserved means something released twice.
+            # Fail loudly: a silent clamp here hides a cap that no longer holds.
+            raise ValueError(f"released {amount} but only {self.spent.get(key)} was reserved")
+        self.spent[key] = remaining
+
+    def reconcile(self, user_id: str, day: str, reserved: Decimal, actual: Decimal) -> None:
+        """Swap the up-front estimate for what the attempt actually cost."""
+        if actual < 0 or reserved < 0:
+            raise ValueError("amounts must be >= 0")
+        self.release(user_id, day, reserved)
+        key = (user_id, day)
+        self.spent[key] = self.spent.get(key, Decimal("0")) + actual
 
     def total(self, user_id: str, day: str) -> Decimal:
         return self.spent.get((user_id, day), Decimal("0"))
@@ -490,10 +513,27 @@ class KillSwitch:
 
 @dataclass
 class CallCost:
-    """What one attempt is expected to cost. Substitute your provider's prices."""
+    """What one attempt costs. Substitute your provider's published prices.
+
+    `usd` is the up-front reservation: the worst case, because you have to
+    reserve before you know. `refused_usd` is what the attempt actually cost
+    when the provider rejected it without doing the work -- a 429 or a 503 is
+    a request you paid for and a result you did not get. Reconciling the
+    difference back is what keeps a throttled hour from eating a user's whole
+    daily cap.
+
+    In production neither number is a constant. Take the actual from the
+    provider's own usage response or its billing export, not from a table in
+    your code that goes stale the next time a price changes.
+    """
 
     tokens: int = 900
     usd: Decimal = Decimal("0.0090")
+    refused_usd: Decimal = Decimal("0.0005")
+
+
+# Statuses where the provider answered without doing the work you asked for.
+REFUSED_STATUSES = frozenset({403, 408, 429, 503})
 
 
 class GovernedClient:
@@ -503,6 +543,14 @@ class GovernedClient:
     everything. The budget is local and must be checked before anything is
     spent. The breaker decides whether the call is worth making at all. Only
     then does anyone touch the network.
+
+    That order puts the daily reservation between two things that can refuse:
+    the reservation is taken, and then the breaker may short-circuit without
+    the provider ever hearing about it. So every attempt runs inside a
+    try/finally that either reconciles the reservation against what the call
+    actually cost or gives it back untouched. Getting this wrong is silent:
+    the money is never spent, the cap fills up anyway, and the daily limit
+    fires in the middle of the outage that caused it.
     """
 
     def __init__(
@@ -564,27 +612,45 @@ class GovernedClient:
             self.ledger.check_before_call(tokens=cost.tokens, cost_usd=cost.usd)
             if self.daily is not None:
                 self.daily.reserve(self.user_id, self.day, cost.usd)
-            self.breaker.before_call()
 
             response = None
             error = None
-            # No single request may outlive the run. A 30-second socket timeout
-            # inside a run with 4 seconds left is a run that overshoots its own
-            # deadline by 26 seconds, once per attempt.
-            timeout = min(self.request_timeout, max(0.0, self.ledger.seconds_left))
+            settled = False
             try:
-                response = self.provider.request(
-                    method,
-                    path,
-                    params=params,
-                    idempotency_key=idempotency_key,
-                    timeout=timeout,
-                    **provider_kwargs,
-                )
-            except TransportError as exc:
-                error = exc
+                # Every exit from here down either settles the reservation or
+                # unwinds through the `finally` that gives it back. The breaker
+                # is the path that matters: it raises CircuitOpen *after* the
+                # money is reserved and without spending any of it.
+                self.breaker.before_call()
+
+                # No single request may outlive the run. A 30-second socket
+                # timeout inside a run with 4 seconds left is a run that
+                # overshoots its own deadline by 26 seconds, once per attempt.
+                timeout = min(self.request_timeout, max(0.0, self.ledger.seconds_left))
+                try:
+                    response = self.provider.request(
+                        method,
+                        path,
+                        params=params,
+                        idempotency_key=idempotency_key,
+                        timeout=timeout,
+                        **provider_kwargs,
+                    )
+                except TransportError as exc:
+                    error = exc
+
+                # The attempt happened, so the reservation becomes real spend --
+                # at what it actually cost, not at the worst case reserved.
+                actual_usd = cost.usd
+                if response is not None and response.status in REFUSED_STATUSES:
+                    actual_usd = cost.refused_usd
+                self.ledger.spend(tokens=cost.tokens, cost_usd=actual_usd)
+                if self.daily is not None:
+                    self.daily.reconcile(self.user_id, self.day, cost.usd, actual_usd)
+                settled = True
             finally:
-                self.ledger.spend(tokens=cost.tokens, cost_usd=cost.usd)
+                if not settled and self.daily is not None:
+                    self.daily.release(self.user_id, self.day, cost.usd)
 
             unhealthy = is_dependency_failure(response, error)
             if unhealthy:
@@ -633,6 +699,28 @@ class GovernedClient:
             attempts=self.max_attempts,
             last_status=status,
         )
+
+
+class _AlwaysDown:
+    """A provider that would return 503 -- if anything ever reached it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def request(self, method: str, path: str, **kwargs: Any) -> Response:
+        self.calls += 1
+        return Response(503, {"Retry-After": "1"}, {"error": {"type": "api_error"}})
+
+
+class _AlwaysThrottled:
+    """A provider that answers every request with a 429."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def request(self, method: str, path: str, **kwargs: Any) -> Response:
+        self.calls += 1
+        return Response(429, {"Retry-After": "1"}, {"error": {"type": "rate_limit_error"}})
 
 
 def _self_check() -> None:
@@ -712,6 +800,108 @@ def _self_check() -> None:
         raise AssertionError("cap must hold")
     except BudgetExhausted as exc:
         assert exc.limit_name == "daily_spend_usd"
+
+    # Releasing more than was reserved is a double-release bug, not a clamp.
+    fresh = DailySpendLedger(cap_usd=Decimal("1.00"))
+    fresh.reserve("user_42", "2026-08-18", Decimal("0.10"))
+    fresh.release("user_42", "2026-08-18", Decimal("0.10"))
+    assert fresh.total("user_42", "2026-08-18") == Decimal("0")
+    try:
+        fresh.release("user_42", "2026-08-18", Decimal("0.01"))
+        raise AssertionError("over-release must raise")
+    except ValueError:
+        pass
+
+    # A short-circuit storm must not consume a single cent of a daily cap. The
+    # breaker refuses after the reservation is taken, which is the path that
+    # leaks if the release is missing.
+    clock = VirtualClock()
+    provider = _AlwaysDown()
+    budget = RunBudget(
+        max_provider_calls=1000,
+        max_tokens=10_000_000,
+        max_cost_usd=Decimal("100.00"),
+        max_wall_clock_seconds=10_000.0,
+    )
+    ledger = RunLedger(budget, clock, run_id="run_leak")
+    breaker = CircuitBreaker(clock, failure_threshold=1, reset_timeout=10_000.0)
+    breaker.record_failure()
+    assert breaker.state == "open"
+    daily = DailySpendLedger(cap_usd=Decimal("100.00"))
+    client = GovernedClient(
+        provider,
+        ledger,
+        breaker,
+        KillSwitch(Path("nonexistent-kill-switch.json"), clock),
+        clock,
+        agent_id="leak-check",
+        user_id="user_42",
+        rng=random.Random(3),
+        daily=daily,
+        day="2026-08-18",
+    )
+    short_circuited = 0
+    for _ in range(20):
+        try:
+            client.call("GET", "/items", params={})
+        except CircuitOpen:
+            short_circuited += 1
+    assert short_circuited == 20, short_circuited
+    assert provider.calls == 0, provider.calls
+    assert ledger.provider_calls == 0, ledger.provider_calls
+    assert daily.total("user_42", "2026-08-18") == Decimal("0"), daily.total(
+        "user_42", "2026-08-18"
+    )
+
+    # A refused call reconciles down to what it actually cost, not the reserve.
+    breaker_ok = CircuitBreaker(clock, failure_threshold=99, reset_timeout=1.0)
+    daily2 = DailySpendLedger(cap_usd=Decimal("100.00"))
+    ledger2 = RunLedger(budget, clock, run_id="run_refused")
+    refusing = GovernedClient(
+        _AlwaysThrottled(),
+        ledger2,
+        breaker_ok,
+        KillSwitch(Path("nonexistent-kill-switch.json"), clock),
+        clock,
+        agent_id="refused-check",
+        user_id="user_42",
+        rng=random.Random(3),
+        daily=daily2,
+        day="2026-08-18",
+        max_attempts=1,
+    )
+    try:
+        refusing.call("GET", "/items", params={})
+        raise AssertionError("a 429 on the last attempt must raise ToolFailed")
+    except ToolFailed:
+        pass
+    assert daily2.total("user_42", "2026-08-18") == CallCost().refused_usd
+
+    # A kill switch that cannot be read stops the run once its cache is stale.
+    stale_clock = VirtualClock()
+    never_read = KillSwitch(Path(__file__), stale_clock, max_staleness=60.0)
+    try:
+        never_read.check("any-agent", "any-user")  # a .py file is not a JSON object
+        raise AssertionError("an unreadable kill switch with no cache must stop the run")
+    except Killed:
+        pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        flag = Path(tmp) / "kill-switch.json"
+        flag.write_text("{}", encoding="utf-8")
+        switch = KillSwitch(flag, stale_clock, ttl=1.0, max_staleness=60.0)
+        switch.check("any-agent", "any-user")  # one good read, now cached
+
+        flag.write_text("not json at all", encoding="utf-8")
+        stale_clock.sleep(30.0)
+        switch.check("any-agent", "any-user")  # broken store, cache still fresh enough
+
+        stale_clock.sleep(31.0)  # now past max_staleness
+        try:
+            switch.check("any-agent", "any-user")
+            raise AssertionError("a stale, unreadable kill switch must stop the run")
+        except Killed:
+            pass
 
     print("guardrail self-checks passed")
 

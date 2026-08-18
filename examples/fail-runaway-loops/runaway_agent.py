@@ -25,6 +25,7 @@ import math
 import random
 import statistics
 import tempfile
+import textwrap
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -248,8 +249,8 @@ def ungoverned() -> dict[str, Any]:
         "forbidden": provider.status_counts.get(403, 0),
         "charges_committed": len(provider.charges),
         "distinct_invoices": len({charge["invoice"] for charge in provider.charges}),
-        "elapsed": clock.monotonic() - 1000.0,
-        "cost_usd": float(COST.usd) * provider.calls,
+        "elapsed": f"{clock.monotonic() - 1000.0:.2f}s",
+        "cost_usd": f"{float(COST.usd) * provider.calls:.4f}",
     }
 
 
@@ -295,8 +296,8 @@ def governed(budget: RunBudget, kill_switch_path: Path) -> dict[str, Any]:
         "charges_committed": len(provider.charges),
         "distinct_invoices": len({charge["invoice"] for charge in provider.charges}),
         "idempotent_replays": sum(1 for event in events if event["replayed"]),
-        "elapsed": clock.monotonic() - 1000.0,
-        "cost_usd": float(ledger.cost_usd),
+        "elapsed": f"{clock.monotonic() - 1000.0:.2f}s",
+        "cost_usd": f"{ledger.cost_usd:.4f}",
         "stopped_by": ledger.stopped_by,
     }
 
@@ -358,6 +359,65 @@ def breaker_demo(kill_switch_path: Path) -> dict[str, Any]:
         "succeeded": succeeded,
         "breaker_state": breaker.state,
         "transitions": [state for _, state in breaker.transitions],
+    }
+
+
+# --------------------------------------------------------------------------
+# 4b. The reservation a short-circuited call must give back.
+# --------------------------------------------------------------------------
+
+
+def reservation_demo(kill_switch_path: Path) -> dict[str, Any]:
+    """Twenty calls into an open breaker. The daily cap must be untouched.
+
+    This is the arithmetic that decides whether your daily cap survives an
+    outage. The reservation is taken before the breaker is consulted, so if
+    nothing gives it back, a breaker-open storm spends a user's entire day on
+    calls the provider never received.
+    """
+    clock = VirtualClock()
+    provider = FakeProvider(clock, limit=10_000, window_seconds=10.0, item_count=25)
+    provider.start_outage(10_000.0)
+    budget = RunBudget(
+        max_provider_calls=1000,
+        max_tokens=10_000_000,
+        max_cost_usd=Decimal("100.00"),
+        max_wall_clock_seconds=10_000.0,
+    )
+    ledger = RunLedger(budget, clock, run_id="run_reserve")
+    breaker = CircuitBreaker(clock, failure_threshold=1, reset_timeout=10_000.0)
+    daily = DailySpendLedger(cap_usd=Decimal("100.00"))
+    client = GovernedClient(
+        provider,
+        ledger,
+        breaker,
+        KillSwitch(kill_switch_path, clock),
+        clock,
+        agent_id=AGENT_ID,
+        user_id=USER_ID,
+        rng=random.Random(17),
+        daily=daily,
+        day=TODAY,
+    )
+
+    # Trip the breaker directly so nothing else can account for the spend, then
+    # make twenty calls that never leave the process.
+    breaker.record_failure()
+    assert breaker.state == "open"
+
+    short_circuited = 0
+    for _ in range(20):
+        try:
+            client.call("GET", "/items", params={}, cost=COST)
+        except CircuitOpen:
+            short_circuited += 1
+
+    return {
+        "short_circuited": short_circuited,
+        "provider_calls": provider.calls,
+        "run_ledger_calls": ledger.provider_calls,
+        "daily_spend_usd": f"{daily.total(USER_ID, TODAY):.4f}",
+        "daily_cap_usd": f"{daily.cap_usd:.4f}",
     }
 
 
@@ -457,6 +517,23 @@ def main() -> None:
         print("== circuit breaker: dependency down for 200s, agent polls every 5s ==")
         outage = breaker_demo(kill_switch_path)
         for key, value in outage.items():
+            if key == "transitions":
+                # Wrapped here rather than in the terminal, so a transcript of
+                # this run can be pasted anywhere without being reflowed.
+                for line in textwrap.wrap(
+                    ", ".join(value),
+                    width=72,
+                    initial_indent=f"  {key}: ",
+                    subsequent_indent="    ",
+                ):
+                    print(line)
+                continue
+            print(f"  {key}: {value}")
+        print()
+
+        print("== reservations: 20 calls into an open breaker ==")
+        reserved = reservation_demo(kill_switch_path)
+        for key, value in reserved.items():
             print(f"  {key}: {value}")
         print()
 
