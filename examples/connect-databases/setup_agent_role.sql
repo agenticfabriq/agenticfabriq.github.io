@@ -20,9 +20,21 @@
 -- 1. Roles. Superuser section.
 -- ---------------------------------------------------------------------------
 
--- The role the application itself runs as, and the one that will own the
--- tables. Not a superuser, so it is subject to the policies in section 5.
+-- The role that OWNS the tables: a migration and DDL identity, nothing more.
+-- NOLOGIN is load-bearing, not tidiness. Section 5 gives this role a permissive
+-- policy so migrations and backfills work, and an owner can additionally run
+-- ALTER TABLE ... DISABLE ROW LEVEL SECURITY and DROP POLICY. There must
+-- therefore be no password on it to put in a connection string. Nothing is a
+-- member of it either; only a superuser can SET ROLE to it.
 CREATE ROLE app_owner NOLOGIN
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+-- The role the application actually connects as at runtime. It is NOT the
+-- owner. It gets the same permissive policy as app_owner in section 5, because
+-- an application that serves every tenant legitimately reads every tenant --
+-- but because it does not own the tables, it cannot disable row-level security
+-- or drop a policy. Both attempts fail with "must be owner of table orders".
+CREATE ROLE app_rw LOGIN PASSWORD 'replace-me-with-a-rotated-secret'
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
 -- A login role that exists only for this agent.
@@ -37,8 +49,10 @@ REVOKE ALL ON DATABASE app FROM PUBLIC;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 
 GRANT CONNECT ON DATABASE app TO app_owner;
+GRANT CONNECT ON DATABASE app TO app_rw;
 GRANT CONNECT ON DATABASE app TO agent_readonly;
 GRANT CREATE, USAGE ON SCHEMA public TO app_owner;
+GRANT USAGE ON SCHEMA public TO app_rw;
 GRANT USAGE ON SCHEMA public TO agent_readonly;
 
 -- ---------------------------------------------------------------------------
@@ -108,6 +122,11 @@ INSERT INTO public.orders (id, account_id, status, total_cents, note) VALUES
 -- 4. Grants. Named relations only, never GRANT SELECT ON ALL TABLES IN SCHEMA.
 -- ---------------------------------------------------------------------------
 
+-- The application's runtime role gets ordinary DML. It is not the owner, so
+-- these grants are the whole of its power over the schema.
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON public.orders, public.accounts, public.account_members TO app_rw;
+
 GRANT SELECT ON TABLE public.orders TO agent_readonly;
 
 -- Column list, so a query touching accounts.billing_email fails on privilege.
@@ -142,6 +161,17 @@ CREATE POLICY app_owner_all ON public.accounts
     FOR ALL TO app_owner USING (true) WITH CHECK (true);
 CREATE POLICY app_owner_all ON public.account_members
     FOR ALL TO app_owner USING (true) WITH CHECK (true);
+
+-- Same predicate for the runtime role, for the same reason: a multi-tenant
+-- application serves every tenant. What differs is not the policy, it is who
+-- can remove it. Per-user scoping is the AGENT's requirement, and that is what
+-- the policies below express.
+CREATE POLICY app_rw_all ON public.orders
+    FOR ALL TO app_rw USING (true) WITH CHECK (true);
+CREATE POLICY app_rw_all ON public.accounts
+    FOR ALL TO app_rw USING (true) WITH CHECK (true);
+CREATE POLICY app_rw_all ON public.account_members
+    FOR ALL TO app_rw USING (true) WITH CHECK (true);
 
 -- current_setting(name, missing_ok) is PostgreSQL 9.6+. The second argument
 -- returns NULL instead of raising when the setting was never set in this
