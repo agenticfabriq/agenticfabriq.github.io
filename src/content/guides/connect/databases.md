@@ -26,7 +26,7 @@ howTo:
   - name: Carry the acting user's identity into the session
     text: Open a transaction and call set_config('app.acting_user_id', $1, true) so the identity is a bound parameter and expires with the transaction.
   - name: Enable and force row-level security
-    text: Run ALTER TABLE ... ENABLE ROW LEVEL SECURITY and ALTER TABLE ... FORCE ROW LEVEL SECURITY, then create a policy that reads the session variable.
+    text: Run ALTER TABLE ... ENABLE ROW LEVEL SECURITY and ALTER TABLE ... FORCE ROW LEVEL SECURITY, then create a policy for the table's owning role and one for the agent that reads the session variable.
   - name: Expose parameterized tools instead of a SQL box
     text: Ship a fixed set of functions with bound parameters and validated arguments, and reserve generated SQL for the cases where the question space is genuinely open.
   - name: Log the query and the user who caused it
@@ -42,6 +42,8 @@ faq:
     answer: When the question space is genuinely open-ended, the target is an analytics replica rather than the transactional primary, row-level security keyed to the acting user is already in place, and a human reads the result before anything acts on it. For a product feature with a countable set of questions, a fixed set of parameterized tools is both safer and more accurate.
   - question: Why does my row-level security policy still show every row to the agent?
     answer: Most often the query goes through a view. A view resolves its base tables with the privileges and policies of the view owner unless it was created WITH (security_invoker = true), which PostgreSQL 15 added. The other common cause is that the agent connects as the table owner, who is exempt from policies unless the table has ALTER TABLE ... FORCE ROW LEVEL SECURITY.
+  - question: Why does my application read zero rows after enabling FORCE ROW LEVEL SECURITY?
+    answer: Because FORCE subjects the table's owner to its policies too, and a table with FORCE and no policy matching the owner default-denies against it. The owning role reads nothing and every write fails with "new row violates row-level security policy". Add a policy for the owner in the same migration, such as CREATE POLICY app_owner_all ON public.orders FOR ALL TO app_owner USING (true) WITH CHECK (true). This never reproduces when you test as a superuser, because superusers bypass row-level security regardless of FORCE.
   - question: Can the agent turn off the statement timeout you set with ALTER ROLE?
     answer: Yes. statement_timeout has a context of user in pg_settings, so any session can raise it or set it to zero. ALTER ROLE gives you a safe default, not an enforced ceiling. Enforce the real limit outside the session, at the connection pooler or proxy, and make privileges rather than timeouts the thing the agent cannot change.
 ---
@@ -49,7 +51,7 @@ faq:
 ## TL;DR
 
 - A read-only role is not containment. It reads every row of every table you granted it, and one generated cross join can saturate the server. Read-only limits verbs, not blast radius.
-- The layers that hold, in order: a login role that belongs to the agent alone, a read replica, `GRANT SELECT` on named relations, `ALTER ROLE ... SET statement_timeout`, row-level security keyed to the acting user, and a fixed set of parameterized tools.
+- The layers that hold, in order: a login role that belongs to the agent alone, a read replica, `GRANT SELECT` on named relations, `ALTER ROLE ... SET statement_timeout`, row-level security keyed to the acting user, and a fixed set of parameterized tools. Watch one edge on the way in: `FORCE ROW LEVEL SECURITY` applies to the table's owner too, so forcing a table without also giving its owning role a policy default-denies against your own application — reads empty, writes rejected — and testing as a superuser will not show you.
 - Carry the end user's identity with `SELECT set_config('app.acting_user_id', $1, true)` and read it in policies as `NULLIF(current_setting('app.acting_user_id', true), '')::bigint`. `SET` cannot take a bound parameter, which is why the obvious alternative is string concatenation.
 - Parameterized queries do not stop prompt injection in a text-to-SQL agent. Placeholders keep a value from becoming SQL. Here the attacker's text becomes SQL by way of the model, upstream of any placeholder.
 - For most product features, ship a fixed tool set rather than a SQL box. Text-to-SQL earns its risk only for open-ended analyst questions, over a replica, under per-user policies, with a human reading the answer before anything acts on it.
@@ -66,13 +68,15 @@ The first is scope. A read-only role that can `SELECT` from your `orders` table 
 
 The second is load. Text-to-SQL produces queries nobody reviewed. A join predicate the model got slightly wrong becomes a cross join; a missing filter becomes a sequential scan over the largest table you have; a `LIKE '%...%'` on an unindexed text column becomes a full read. On a shared primary, one of those competes with the transactions your customers are waiting on. Nobody chose to run it, and no application-level retry limit prevents it, because the first attempt is the one that hurts.
 
-The third is instruction. Rows contain text that users wrote. A support ticket body, a customer's delivery note, a product review — these arrive in the model's context as data, but a model has no mechanism that distinguishes data from instruction. OWASP calls this indirect prompt injection and ranks it first in the [OWASP Top 10 for LLM Applications](https://genai.owasp.org/llmrisk/llm01-prompt-injection/), whose first example scenario is an attacker instructing a support chatbot to query private data stores. When the agent's job is to write SQL, the injected instruction does not have to break out of a query. It only has to persuade the thing that writes the queries.
+The third is instruction. Rows contain text that users wrote. A support ticket body, a customer's delivery note, a product review — these arrive in the model's context as data, but a model has no mechanism that distinguishes data from instruction. OWASP calls this indirect prompt injection, a subtype of LLM01, which is the first-ranked entry in the [OWASP Top 10 for LLM Applications](https://genai.owasp.org/llmrisk/llm01-prompt-injection/). Its scenario #4 is the exact analogue of a database row: an attacker modifies a document in a repository a retrieval-augmented application reads, and when a user's query returns that content, the instructions inside it alter the model's output. When the agent's job is to write SQL, the injected instruction does not have to break out of a query. It only has to persuade the thing that writes the queries.
 
 Those three combine badly. The layers below address them separately, because no single one of them addresses all three.
 
 ## Step by step
 
-One path, start to finish: a constrained role, a policy keyed to the acting user, and two tools instead of a SQL prompt. Every statement here was executed against PostgreSQL 17.11 exactly as written. The full sources are `examples/connect-databases/setup_agent_role.sql`, `examples/connect-databases/prove_rls.sql`, and `examples/connect-databases/query_tools.py`.
+One path, start to finish: a constrained role, a policy keyed to the acting user, and two tools instead of a SQL prompt. Every statement here was executed against PostgreSQL 17.11 exactly as written.
+
+One assumption runs through all of it. The application's tables are owned by an ordinary non-superuser role, called `app_owner` below, and the agent's role is a second, weaker role. Build the example as a superuser and step 6 cannot be demonstrated at all, because a superuser bypasses every policy you write. `examples/connect-databases/setup_agent_role.sql` therefore runs its object-creation section under `SET ROLE app_owner`; the file's header names which statements need superuser and which do not. The other sources are `examples/connect-databases/checks.sql` (the CI assertions), `examples/connect-databases/prove_rls.sql` (the transcript), `examples/connect-databases/view_ownership.sql`, and `examples/connect-databases/query_tools.py`.
 
 ### 1. Create a login role that belongs to the agent alone
 
@@ -83,7 +87,7 @@ CREATE ROLE agent_readonly LOGIN PASSWORD 'replace-me-with-a-rotated-secret'
     NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 ```
 
-`NOBYPASSRLS` is the default, and writing it anyway is worth typing anyway: a role with `BYPASSRLS` ignores every policy you are about to write, and so does a superuser. That is not a policy misconfiguration you can detect by reading the policies.
+`NOBYPASSRLS` is the default, and writing it out is still worth the line: a role with `BYPASSRLS` ignores every policy you are about to write, and so does a superuser. That is not a policy misconfiguration you can detect by reading the policies.
 
 Then take back what every role gets for free:
 
@@ -104,7 +108,9 @@ GRANT SELECT ON TABLE public.orders TO agent_readonly;
 GRANT SELECT (id, name) ON TABLE public.accounts TO agent_readonly;
 ```
 
-Column-level grants are the cheapest win in this whole guide and almost nobody uses them. `GRANT SELECT (id, name)` means a query touching `accounts.billing_email` fails with a privilege error rather than returning a column you forgot existed. Ten minutes with the column list of your widest table will remove more data from the agent's reach than any prompt engineering.
+Column-level grants are the cheapest win in this whole guide and almost nobody uses them. `GRANT SELECT (id, name)` means a query touching `accounts.billing_email` fails with `permission denied for table accounts` rather than returning a column you forgot existed. Ten minutes with the column list of your widest table will remove more data from the agent's reach than any prompt engineering.
+
+Notice what that grant does *not* do. `accounts` is the tenant list, and a column grant hides `billing_email` while leaving the agent free to read `id` and `name` for every customer you have. Column grants narrow rows sideways, never downwards. `accounts` needs its own policy in step 6, and so does `account_members`; a table you added only because a policy or a tool needed to join it is exactly the table that gets left uncovered.
 
 Two things not to do. Do not `GRANT SELECT ON ALL TABLES IN SCHEMA public` — it is a one-time expansion over the tables that exist right now, so it silently understates what you meant and silently misses every table added next quarter. And do not reach for the `pg_read_all_data` predefined role: PostgreSQL's own documentation notes it "does not bypass row-level security (RLS) policies", which sounds reassuring until you notice that it hands out `SELECT` on everything, which is the part you were trying to avoid.
 
@@ -180,6 +186,17 @@ ALTER TABLE public.orders FORCE ROW LEVEL SECURITY;
 
 `ENABLE` alone leaves a hole. PostgreSQL's [row security documentation](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) says table owners "normally bypass row security as well", and `FORCE` is what subjects the owner to its own policies. If the agent's connection string ever points at the owner role — a copy-pasted DSN, a migration user, a local development shortcut that reached staging — `ENABLE` without `FORCE` protects nothing. Note the limit: `FORCE` does not constrain a superuser or a role with `BYPASSRLS`, which "always bypass the row security system".
 
+**Do not ship those two statements on their own.** "Its own policies" presupposes the owner has policies, and a table with `FORCE` and no policy matching the owner default-denies against it — the same default-deny that protects you from an unidentified agent now points at your application. On a table owned by an ordinary non-superuser role, which is what a real deployment looks like, `SELECT count(*) FROM public.orders` as the owner returns `0` and every write fails with `new row violates row-level security policy for table "orders"`. Reads empty, writes rejected, no configuration changed: the application is simply down. PostgreSQL's docs do not warn about this, and it does not reproduce at all if you test as a superuser, because superusers bypass RLS whatever `FORCE` says.
+
+So give the application's own role a policy in the same migration that turns `FORCE` on, before anything reads the table:
+
+```sql
+CREATE POLICY app_owner_all ON public.orders
+    FOR ALL TO app_owner USING (true) WITH CHECK (true);
+```
+
+`FOR ALL` covers `SELECT`, `INSERT`, `UPDATE` and `DELETE`; `USING` governs which existing rows the owner sees and `WITH CHECK` which new rows it may write. `WITH CHECK` is optional here — omit it and PostgreSQL applies the `USING` expression to new rows as well — but write it out, because the moment you narrow `USING` to something other than `true` you want the write rule to be a decision rather than an inherited default. This is not a hole in the containment — `app_owner` is the role that already owns the data, and the agent's role gets a separate, narrow policy below. What it buys is that `FORCE` now means "the owner is governed by an explicit policy" instead of "the owner is locked out". `examples/connect-databases/checks.sql` asserts this property across every forced table, and it is the first assertion in the file because it is the one that takes production down rather than leaking from it.
+
 Then the policy:
 
 ```sql
@@ -205,6 +222,8 @@ The `USING` expression is where the wrong forms cluster.
 Policies are permissive by default and combine with `OR`, so a second permissive policy widens access rather than narrowing it. When you want a condition every row must satisfy, write `AS RESTRICTIVE`, which combines with `AND`.
 
 One consequence that surprises people: a policy expression runs with the privileges of the querying role, so the policy above requires `GRANT SELECT ON public.account_members TO agent_readonly`. Without it every query fails with `permission denied for table account_members`. Grant the lookup table too, and put a policy on it as well so the agent cannot enumerate the whole membership map.
+
+Apply the same pair — `ENABLE`, `FORCE`, an `app_owner_all` policy, and an agent policy keyed to the acting user — to `accounts` and `account_members`, not just to `orders`. The setup file does all three. Half-covering the set is the most common way this ends up looking correct in review and leaking in production: the interesting table is locked down and the join table beside it hands over the shape of everything.
 
 ### 7. Expose parameterized tools instead of a SQL box
 
@@ -265,13 +284,19 @@ $ python3 query_tools.py 1
 -- order_summary as user 1
 {'account_id': 100, 'status': 'refunded', 'order_count': 1, 'total_cents': Decimal('4900')}
 {'account_id': 100, 'status': 'shipped', 'order_count': 1, 'total_cents': Decimal('12900')}
+-- shipped orders as user 1
+{'id': 5001, 'account_id': 100, 'status': 'shipped', 'total_cents': 12900, 'placed_at': datetime.datetime(2026, 8, 18, 22, 21, 22, 470759, tzinfo=zoneinfo.ZoneInfo(key='Etc/UTC'))}
 
 $ python3 query_tools.py 2
 -- order_summary as user 2
 {'account_id': 200, 'status': 'shipped', 'order_count': 1, 'total_cents': Decimal('88000')}
+-- shipped orders as user 2
+{'id': 5003, 'account_id': 200, 'status': 'shipped', 'total_cents': 88000, 'placed_at': datetime.datetime(2026, 8, 18, 22, 21, 22, 470759, tzinfo=zoneinfo.ZoneInfo(key='Etc/UTC'))}
 ```
 
-`examples/connect-databases/prove_rls.sql` runs the same proof in `psql`, including the case that matters most: with no identity set, `SELECT count(*) FROM public.orders` returns `0`. Run that assertion in CI. A regression here is silent — nothing errors, the agent just starts seeing more — and a test that only checks "user 1 sees their own rows" passes just as happily when user 1 sees everyone's.
+The `placed_at` values come from `now()` when the example data was seeded, so yours will differ; nothing else in that output does.
+
+`examples/connect-databases/prove_rls.sql` runs the same proof in `psql`, including the case that matters most: with no identity set, `SELECT count(*) FROM public.orders` returns `0`. Run that assertion in CI — `examples/connect-databases/checks.sql` is that file, seven assertions that exit 0 together and exit 3 on the first regression. A regression here is silent — nothing errors, the agent just starts seeing more — and a test that only checks "user 1 sees their own rows" passes just as happily when user 1 sees everyone's. Run `checks.sql` as the agent's own role, never as a superuser, or every behavioural assertion in it passes vacuously.
 
 Note what the summary above comes from. `order_summary` is a view, and views are where per-user access quietly dies:
 
@@ -282,7 +307,13 @@ FROM public.orders AS o
 GROUP BY o.account_id, o.status;
 ```
 
-Without `security_invoker`, a view resolves its base tables as the view's owner, and the owner's policies apply — so an agent querying the view sees every account. The same view with the option returns only the caller's. Both were run side by side on 17.11. `security_invoker` arrived in PostgreSQL 15; on 14 and earlier, a view over an RLS-protected table is not a safe way to expose that table to a lower-privileged role.
+Without `security_invoker`, a view resolves its base tables as the view's owner and returns whatever the *owner* can see. What that means for the agent depends on the owner, and it is worth knowing all three answers because two of them look like success. `examples/connect-databases/view_ownership.sql` runs them side by side on 17.11:
+
+- Owner is a non-superuser with the permissive `app_owner_all` policy from step 6 — the configuration this guide builds. The definer view returns **every account**. This is the leak, and it is the case a reader who followed the guide is actually in.
+- Owner is a non-superuser subject to `FORCE` with no policy. The definer view returns **nothing**, because the owner itself is locked out. Not safety: the same outage step 6 warns about, arriving through a view.
+- Owner is a superuser. The definer view returns **every account** again, since a superuser bypasses RLS whatever `FORCE` says.
+
+The same view created `WITH (security_invoker = true)` returns only the caller's rows in all three. `security_invoker` arrived in PostgreSQL 15; on 14 and earlier, a view over an RLS-protected table is not a safe way to expose that table to a lower-privileged role.
 
 ### 9. Log the query and the user who caused it
 
@@ -329,6 +360,8 @@ Text-to-SQL earns its risk in one shape: an internal analyst tool, over an analy
 - [ ] `ALTER ROLE ... SET statement_timeout` is set, and a second enforced timeout exists outside the session at the pooler or proxy.
 - [ ] Agent traffic resolves to a read replica, verified by `SELECT pg_is_in_recovery()` returning true from the agent's own connection.
 - [ ] Every table holding per-user or per-tenant data has both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`.
+- [ ] Every table with `FORCE` also has a policy covering its owning role, verified before deploy — `FORCE` with no owner policy default-denies against your own application, emptying its reads and rejecting its writes.
+- [ ] Lookup and tenant-listing tables are covered too, not just the table holding the interesting rows. A column grant hides a column; it does not stop the agent enumerating every tenant.
 - [ ] Every policy reads the identity as `NULLIF(current_setting('app.acting_user_id', true), '')::bigint` or the equivalent for its key type.
 - [ ] The identity is set with `set_config(..., true)` inside the transaction that uses it, never with a concatenated `SET` and never session-scoped on a pooled connection.
 - [ ] Every view the agent can read was created `WITH (security_invoker = true)`, or the guide's reason for the exception is written down.
@@ -345,9 +378,21 @@ Text-to-SQL earns its risk in one shape: an internal analyst tool, over an analy
 
 **Symptom:** no exception, no privilege error, no anomaly in latency. A user reports seeing a row they should not have, or nobody reports anything and you find it in a log months later.
 
-**Cause:** almost always one of three things. The query goes through a view created without `security_invoker`, so base tables resolve as the view owner. The connection is the table owner's and the table has `ENABLE` but not `FORCE ROW LEVEL SECURITY`. Or the role was granted `BYPASSRLS` by someone debugging a policy that "wasn't working".
+**Cause:** either the querying role is not subject to the policies, or the rows are being fetched on behalf of a role that sees more than it does.
 
-**Fix:** audit all three explicitly — `SELECT relrowsecurity, relforcerowsecurity FROM pg_class` for the tables, `reloptions` for the views, and `rolbypassrls` in `pg_roles` for the role. Then add the zero-rows-without-identity assertion to CI, because this class of bug is invisible to every test that checks a positive case.
+The first has three forms: the connection is the table owner's and the table has `ENABLE` but not `FORCE ROW LEVEL SECURITY`; the role holds `BYPASSRLS`, often granted by someone debugging a policy that "wasn't working"; or the role is a superuser.
+
+The second is a view without `security_invoker`, and it is worth separating out because it bites even when the first three are all clean. Such a view returns the *owner's* row set, and under the configuration step 6 prescribes the owner holds a permissive `app_owner_all` policy — so the owner sees every row, and so does anyone you grant the view to. The owner does not have to bypass RLS for this to leak; it only has to be allowed to see more than the caller, which is the normal state of affairs for an application role.
+
+**Fix:** audit each one explicitly — `relrowsecurity` and `relforcerowsecurity` in `pg_class` for the tables, `reloptions` for the views, `rolbypassrls` and `rolsuper` in `pg_roles` for the roles. Assertions 2 and 3 in `examples/connect-databases/checks.sql` do the first two as a CI gate, and `examples/connect-databases/view_ownership.sql` reproduces the view case under all three ownership models so you can see which one you are in. Then add the zero-rows-without-identity assertion, because this class of bug is invisible to every test that checks a positive case.
+
+### The application reads zero rows the moment you turn on RLS
+
+**Symptom:** immediately after a migration that adds row-level security, the application's own queries return empty result sets and every write fails with `new row violates row-level security policy for table "orders"`. Nothing was denied at the privilege level, the role still owns the table, and the same migration passed on a laptop.
+
+**Cause:** the owner-policy trap from step 6 — `FORCE` applied with policies written only `TO agent_readonly`. It passed on the laptop because the laptop's tables are owned by `postgres`, and a superuser bypasses RLS whatever `FORCE` says, so the entire failure is invisible in any environment where the schema was created by a superuser.
+
+**Fix:** create the owner's policy in the same migration as `FORCE`, never in a follow-up: `CREATE POLICY app_owner_all ON public.orders FOR ALL TO app_owner USING (true) WITH CHECK (true);`. Then stop the class of bug rather than the instance — assertion 1 in `examples/connect-databases/checks.sql` fails the build for any forced table with no policy covering its owner, and run your migration tests against a non-superuser owner so this reproduces before deploy instead of after.
 
 ### A generated query takes the database down
 
@@ -355,7 +400,7 @@ Text-to-SQL earns its risk in one shape: an internal analyst tool, over an analy
 
 **Cause:** the model produced a cross join, an unfiltered scan of the largest table, or an aggregate over a partition set it did not know was a partition set. RLS does not help — a policy narrows which rows are visible, not how much work finding them costs. In the example schema a `CROSS JOIN` against a policy-protected table still runs; it just returns the caller's rows.
 
-A row cap does not help either, and it is worth seeing why, because `LIMIT` looks like a work cap. A plan can stop early only when nothing above the `Limit` node needs the whole input. `EXPLAIN` on the example schema puts `SELECT o.id FROM orders o CROSS JOIN orders o2 LIMIT 200` at an estimated cost of 2.52, because it stops as soon as it has 200 rows. Add `ORDER BY o.total_cents` and the same query estimates 23,576, because the sort underneath the limit has to consume its whole input — 422,500 rows by the planner's estimate — before it can hand over the first one. `GROUP BY`, `DISTINCT`, and `count(*)` do the same thing. Models write `ORDER BY`.
+A row cap does not help either, and it is worth seeing why, because `LIMIT` looks like a work cap. A plan can stop early only when nothing above the `Limit` node needs the whole input. Run the two `EXPLAIN`s in `prove_rls.sql` from the agent's own connection: `SELECT o.id FROM orders o CROSS JOIN orders o2 LIMIT 200` comes back with a `Limit` node at an estimated total cost of 18.94, because it stops as soon as it has 200 rows. Add `ORDER BY o.total_cents` and the same query estimates 5,939.28, because the `Sort` underneath the limit has to consume its whole input — 105,625 rows on the planner's estimate — before it can hand over the first one. `GROUP BY`, `DISTINCT` and `count(*)` do the same thing. Models write `ORDER BY`.
 
 **Fix:** the replica plus `statement_timeout` plus the pooler-level timeout, in that order of importance. Add `EXPLAIN` before execution if you run generated SQL at all, and refuse plans whose estimated cost exceeds a threshold — an estimate is not a guarantee, but a plan estimating a billion rows is a reliable enough signal to reject on.
 
