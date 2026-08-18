@@ -38,7 +38,9 @@ faq:
   - question: Can a Notion integration lose access without anyone changing its settings?
     answer: Yes. Notion states that if a user loses edit access to the page where they added a connection, that connection also drops to read access, regardless of the capabilities it was created with.
   - question: Do I need Google verification to read a user's Drive files?
-    answer: Only if you use a restricted scope. drive.file is non-sensitive, while drive, drive.readonly, drive.metadata, and drive.metadata.readonly are restricted, which brings OAuth verification and a security assessment if restricted-scope data reaches your servers.
+    answer: Only if you use a restricted scope, and the verification requirement attaches to public production access. drive.file is non-sensitive, while drive, drive.readonly, drive.metadata, and drive.metadata.readonly are restricted, which brings OAuth verification plus a security assessment if restricted-scope data reaches your servers. Confirm your own case against Google's restricted-scope verification page, because internal-only apps follow a different path.
+  - question: Can a Notion workspace owner stop members from sharing pages with a connection?
+    answer: On Enterprise plans, yes. A workspace owner can open Settings then Connections, use the Manage tab, select the connection's ... menu and Manage page access, and set Who can manage page access to Connection owners only. Enterprise owners can also restrict which connections members may install. It does not change child-page inheritance.
   - question: What is the Google Picker API for?
     answer: It renders a Drive file-open dialog inside your app and is how a drive.file grant grows one file at a time. Google recommends pairing it with drive.file, and for desktop and mobile apps drive.file is the only scope the Picker permits.
 ---
@@ -46,10 +48,10 @@ faq:
 ## TL;DR
 
 - On Drive, default to `https://www.googleapis.com/auth/drive.file`. Google classifies it as non-sensitive and describes it as covering files "that you open with an app or that the user shares with an app while using the Google Picker API or the app's file picker". Pair it with the Google Picker and the grant grows one file at a time.
-- `https://www.googleapis.com/auth/drive` and `https://www.googleapis.com/auth/drive.readonly` are *restricted* scopes. They bring OAuth verification, and a security assessment once restricted-scope data reaches your own servers. Choosing them costs weeks before it costs anything else.
+- `https://www.googleapis.com/auth/drive` and `https://www.googleapis.com/auth/drive.readonly` are *restricted* scopes. Public production access brings OAuth verification, and a security assessment once restricted-scope data reaches your own servers. Choosing them costs weeks before it costs anything else.
 - Notion has no content scopes at all. A connection has *capabilities* — read content, update content, insert content, read comments, insert comments, and one of three user-information settings — and separately it has a list of pages a human added it to.
 - Notion access is inherited: "Sharing a parent page with the connection grants access to all of its child pages as well." One click by a non-engineer can hand an agent a subtree nobody has inventoried.
-- The two models fail in opposite directions. Drive over-grants in a code review, where an engineer can see the scope string in a diff. Notion over-grants in a page menu, where no engineer is present and nothing appears in the diff at all.
+- The two models fail in opposite directions. Drive over-grants in a code review, where an engineer can see the scope string in a diff. Notion over-grants in a page menu, where by default no engineer is present and nothing appears in the diff at all — Enterprise workspaces can restrict who is allowed to open that menu, and should.
 
 ## Who this is for
 
@@ -76,7 +78,7 @@ These are the Drive scopes worth knowing, with Google's own classification:
 | Scope | What it permits | Classification |
 | --- | --- | --- |
 | `https://www.googleapis.com/auth/drive.file` | Create new Drive files, or modify existing files, that the user opens with the app or shares with it through the Google Picker. | Non-sensitive |
-| `https://www.googleapis.com/auth/drive.appdata` | View and manage the app's own configuration data in the user's Drive. Invisible to the user, unreadable by other apps. | Non-sensitive |
+| `https://www.googleapis.com/auth/drive.appdata` | View and manage the app's own configuration data in the user's Drive. | Non-sensitive |
 | `https://www.googleapis.com/auth/drive.install` | Let the app appear in Drive's "Open with" or "New" menu. | Non-sensitive |
 | `https://www.googleapis.com/auth/drive.apps.readonly` | View the apps authorized to access the user's Drive. | Sensitive |
 | `https://www.googleapis.com/auth/drive.metadata.readonly` | View metadata for every file in the Drive. No content. | Restricted |
@@ -98,7 +100,7 @@ A reviewer who sees `drive.readonly` in a diff should ask one question: *which f
 
 Google's guidance is explicit that using `drive.file` together with the Picker optimises both user experience and safety, and that web apps using the Picker can use `drive.file`, `drive.readonly` and others, while desktop and mobile apps are strict: only `drive.file` is permitted. You pass the OAuth access token to the Picker with `setOAuthToken(accessToken)`, and the user's selection is what extends the grant.
 
-`DocsView` is where you constrain what the user can even pick. `setMimeTypes(mimeTypes)` limits the view to the file types your agent can handle, `setParent(parentId)` sets the initial folder, `setIncludeFolders(included)` shows folders in the view, and `setSelectFolderEnabled(enabled)` allows selecting one. Leave the last one off unless you have a reason. A folder selection is the Drive-side equivalent of sharing a Notion parent, and the guidance below applies.
+`DocsView` is where you constrain what the user can even pick. `setMimeTypes(mimeTypes)` limits the view to the file types your agent can handle, `setParent(parentId)` sets the initial folder, `setIncludeFolders(included)` shows folders in the view, and `setSelectFolderEnabled(enabled)` allows selecting one. Leave the last one off unless you have a reason. A folder selection may be the Drive-side equivalent of sharing a Notion parent — see below for why that is a question rather than a statement.
 
 One thing to check for yourself rather than take from this page: I could not find a statement on Google's Drive or Picker documentation that says whether a `drive.file` grant on a folder extends to the files inside it. The mechanism is testable in about a minute — select a folder in the Picker, then call `files.list` with `q='<folderId>' in parents` and see whether the children come back or whether a direct `files.get` on one of them returns `appNotAuthorizedToFile`. Do that test on your own client before you design around either answer. `list_children()` in the example script carries the same caveat in a comment rather than assuming.
 
@@ -107,21 +109,35 @@ One thing to check for yourself rather than take from this page: I could not fin
 Drive splits sharply between blob files and Google Workspace editor files. A PDF or a CSV has bytes, and you fetch them with `files.get` plus `alt=media`, which Google describes as telling the server that a download of content is being requested as an alternative response format. A Google Doc has no bytes to fetch; it must be converted, which is `files.export` with a target MIME type.
 
 ```python
-EXPORT_AS = {
-    "application/vnd.google-apps.document": "text/plain",
-    "application/vnd.google-apps.spreadsheet": "text/csv",  # first sheet only
-}
-
 export_mime = EXPORT_AS.get(mime_type)
 if export_mime is not None:
-    response = call(token, f"/files/{file_id}/export", params={"mimeType": export_mime})
-elif mime_type.startswith("text/") or mime_type == "application/json":
-    response = call(token, f"/files/{file_id}", params={"alt": "media"})
-else:
-    return f"<{mime_type}: not fetched>"   # binary; do not pull speculatively
+    try:
+        response = call(token, f"/files/{file_id}/export",
+                        params={"mimeType": export_mime})
+    except DriveError as error:
+        if error.status in (403, 400):
+            raise ExportTooLarge(
+                f"export of {file_id} as {export_mime} failed ({error}). "
+                "Exported content is limited to 10 MB; for larger content "
+                "use files.download with a long-running operation."
+            ) from error
+        raise
+    if len(response.content) >= EXPORT_SIZE_LIMIT_BYTES:
+        raise ExportTooLarge(...)
+    text = response.text[:limit]
+    if mime_type == GOOGLE_SHEET_MIME:
+        return PARTIAL_SHEET_MARKER + text   # names the limitation in the payload
+    return text
+
+if mime_type.startswith("text/") or mime_type == "application/json":
+    return call(token, f"/files/{file_id}", params={"alt": "media"}).text[:limit]
+
+return f"<{mime_type}: not fetched>"   # binary; do not pull speculatively
 ```
 
-Two constraints belong in the code, not in a comment. Exported content is limited to 10 MB, so an export path with no size handling will fail on exactly the large documents an agent is most likely to be pointed at; Drive offers `files.download` with a long-running operation for content beyond that limit. And exporting a spreadsheet to `text/csv` gives you the first sheet, which means a silent, partial read of a multi-sheet workbook — the worst kind of failure, because the agent produces a confident answer from two thirds of the data.
+Two constraints belong in the code, not in a comment, which is why they are in the code above rather than in the sentence you are reading. Exported content is limited to 10 MB, so an export path with no size handling fails on exactly the large documents an agent is most likely to be pointed at; `read_text()` converts that failure into a named `ExportTooLarge` carrying the route that does work, `files.download` with a long-running operation. And exporting a spreadsheet to `text/csv` gives you the first sheet, so the example returns it behind `PARTIAL_SHEET_MARKER`, a line of text stating that other sheets were not read. That marker travels with the content into the prompt, which is the only place it can do any good — a silent, partial read is the worst kind of failure, because the agent produces a confident answer from two thirds of the data.
+
+One honesty note on that error branch: Google documents the 10 MB limit but I did not find the error reason string Drive returns when a document exceeds it, so the code branches on the export call failing rather than on a literal I could not verify. If you find the reason string on a Google page, tighten the branch.
 
 Truncate before the prompt, not after. `read_text()` in the example takes a `limit` and applies it at the boundary, because a 200-page contract that reaches your process has already been through your logs and your retry buffers even if the model never sees it. The [failure pillar](/fail/) covers where that content escapes next.
 
@@ -161,11 +177,13 @@ Read and insert are genuinely separable, and the split is useful. An agent that 
 
 Capabilities are set once on the connection and apply everywhere it is added. There is no per-page capability. If one workflow needs write access and another needs read, that is two connections, not one connection used carefully.
 
-Authenticate with the `Authorization: Bearer {INTEGRATION_TOKEN}` header and pin `Notion-Version`. Notion treats the version header as required and returns 400 `missing_version` without it. As of this writing the current version is `2026-03-11`; check [Notion's changelog](https://developers.notion.com/page/changelog) before you move that string, because the `2025-09-03` version was a breaking change that split databases into databases plus data sources and moved queries from `POST /v1/databases/{id}/query` to `POST /v1/data_sources/{id}/query`. Notion's changelog also notes that tokens issued from 25 September 2024 carry an `ntn_` prefix instead of the older `secret_`, and advises treating the token as an opaque string rather than validating it with a regular expression — so use the prefix to recognise a leaked secret in a scanner, not to gate your own code.
+Authenticate with the `Authorization: Bearer {INTEGRATION_TOKEN}` header and pin `Notion-Version`. Notion treats the version header as required and returns 400 `missing_version` without it. As of this writing the current version is `2026-03-11`; check [Notion's changelog](https://developers.notion.com/page/changelog) before you move that string, because the `2025-09-03` version was a breaking change that split databases into databases plus data sources and moved queries from `POST /v1/databases/{id}/query` to `POST /v1/data_sources/{id}/query`. (Check that and you will find Notion's own upgrade guide rendering the older form as `PATCH` in at least one place. The endpoint reference is the one to trust: it states `post /v1/data_sources/{data_source_id}/query`.) Notion's changelog also notes that tokens issued from 25 September 2024 carry an `ntn_` prefix instead of the older `secret_`, and advises treating the token as an opaque string rather than validating it with a regular expression — so use the prefix to recognise a leaked secret in a scanner, not to gate your own code.
 
 ### 6. Share exactly one page, then count what arrived
 
 A new connection has no page access at all, and Notion is direct about the consequence: skip the sharing step and every API request returns an error. Access comes from a human, through the UI: open the page, click the `•••` menu in the top-right corner, select **Connections**, then **+ Add connection**, and choose the connection. For a public integration the equivalent happens during the OAuth prompt, where users select which pages to give the connection access to.
+
+*Which* human is allowed to make that click is itself configurable, on Enterprise plans, and this is the one product control aimed squarely at the problem this guide describes. A workspace owner opens `Settings` → `Connections`, switches to the `Manage` tab, selects `•••` next to the connection and then `Manage page access`, and changes **Who can manage page access** from **Connection owners & workspace members** to **Connection owners only**. Enterprise owners can also restrict which connections members are allowed to install at all. If you are on Enterprise, set both before you write any code: it moves the grant decision from whoever happened to have a page open to a named, small set of people who can be asked what a subtree is. It does not change inheritance — a connection owner who shares a parent still hands over everything beneath it — and on every plan below Enterprise the control is not available, which is why the rest of this section is about detection rather than prevention.
 
 And here is the sentence the whole Notion half of this guide exists for, from Notion's own documentation:
 
@@ -216,9 +234,11 @@ Everything else worth retrying is 429, 529, and 5xx. On 429 read `Retry-After`, 
 | Drive `drive.file` + Google Picker | The agent works on documents a user points at. The default, and correct far more often than it is chosen. | A UI surface you have to build; no discovery, so every id comes from a human or from a file the agent made. | Workflows that assumed search. `files.list` returns only what the app was given, which reads as "the API is broken". |
 | Drive restricted scope (`drive.readonly` / `drive`) | The agent genuinely must index or search a whole Drive — e-discovery, migration, a corpus-wide classifier. | OAuth verification, plus a security assessment once restricted-scope data reaches your servers. Weeks, not days. | The launch date. The scope works immediately in testing and blocks you at production access. |
 | Drive service account added to a shared drive | Unattended jobs over a fixed, org-owned corpus with no interactive user to consent. | An identity users cannot see or revoke; membership managed as a shared-drive setting rather than in your code. | Attribution. Every action is the service account's, so "who read this" has one answer for every job. |
-| Notion connection, shared per page | Any Notion agent. There is no alternative model — this is how Notion works. | Grants are made by humans in a UI, invisible to code review, and inherited by child pages. | Reach. The subtree grows without a deploy, and nothing notifies you. |
+| Notion connection, shared per page | Any Notion agent. There is no alternative model — this is how Notion works. | Grants are made by humans in a UI and inherited by child pages. Invisible to code review by default, though Enterprise plans can restrict page-access management to connection owners. | Reach. The subtree grows without a deploy, and nothing notifies you. |
 
-The Drive rows are a real choice; the Notion row is a constraint. That asymmetry is worth planning around: on Drive you can move risk into your code, and on Notion you cannot. What you can do on Notion is instrument the grant — audit the subtree on a schedule, alert when the reachable page count jumps, and pick capabilities that make a mis-share less costly. A connection with only *read content* and *user information without email addresses* that is accidentally given the whole workspace is a bad day. The same mistake with *update content* is a restoration from backup.
+One caveat on the service account row that catches people: Google notes that service accounts do not belong to your Workspace domain the way user accounts do, so anything shared with your entire domain is *not* thereby shared with a service account. Its access is exactly the memberships and file permissions you granted it, which is a feature for blast radius and a surprise for anyone expecting domain-wide sharing to carry.
+
+The Drive rows are a real choice; the Notion row is a constraint. That asymmetry is worth planning around: on Drive you can move risk into your code, and on Notion you mostly cannot. What you can do on Notion is narrow who is permitted to make the grant — **Who can manage page access**, Enterprise only — and instrument it on every plan: audit the subtree on a schedule, alert when the reachable page count jumps, and pick capabilities that make a mis-share less costly. A connection with only *read content* and *user information without email addresses* that is accidentally given the whole workspace is a bad day. The same mistake with *update content* is a restoration from backup.
 
 ## Checklist
 
@@ -227,11 +247,15 @@ The Drive rows are a real choice; the Notion row is a constraint. That asymmetry
 - [ ] The Picker constrains selection with `setMimeTypes`, and `setSelectFolderEnabled` is off unless folder selection is a requirement.
 - [ ] You have tested, on your own client, whether a picked folder extends the grant to its contents, and the code matches the answer.
 - [ ] `appNotAuthorizedToFile` routes the user back to the Picker instead of triggering a retry or a scope change.
-- [ ] Workspace documents go through `files.export`, and the 10 MB export limit has a handled path.
-- [ ] Multi-sheet spreadsheet exports are either handled or explicitly refused, not silently truncated to sheet one.
+- [ ] Workspace documents go through `files.export`, and the 10 MB export limit has a handled path that names `files.download`.
+- [ ] Multi-sheet spreadsheet exports carry a marker in the returned text saying which sheet was read, or are refused outright.
+- [ ] `files.list` results are checked for `incompleteSearch`, so a truncated listing is never reported as an inventory.
+- [ ] `corpora` is `user` or `drive` rather than `allDrives`, which Google's `files.list` reference asks you to prefer for efficiency.
+- [ ] A 401 mid-run triggers exactly one token refresh, and a refresh that returns `invalid_grant` stops the run instead of continuing with partial results.
 - [ ] The Notion connection's capabilities are the minimum set, and the user-information setting is not the email-inclusive one unless email is required.
 - [ ] Read-only and write workflows use separate Notion connections, because capabilities are per-connection.
 - [ ] `Notion-Version` is pinned to a literal in one place, and upgrading it is a reviewed change.
+- [ ] On an Enterprise plan, **Who can manage page access** is set to **Connection owners only**, and the connections members may install are restricted.
 - [ ] The subtree audit runs on a schedule and alerts when the reachable page count changes.
 - [ ] `object_not_found` and `restricted_resource` are terminal in your retry logic; only 429, 529, and 5xx retry.
 - [ ] Document text is truncated at the fetch boundary, before it can reach a prompt or a log.
@@ -245,7 +269,7 @@ The Drive rows are a real choice; the Notion row is a constraint. That asymmetry
 
 **Cause:** a parent page was shared with the connection, and every child came with it. On the Drive side, the same shape arrives when a broad scope makes the whole account reachable, or possibly when a folder is picked — see step 2 for why that last one is a question rather than a statement.
 
-**Fix:** run the subtree audit and compare its count against intent. Remove the connection from the parent, add it to the specific pages, and re-run. Then make the audit periodic, because the leaf-level grant you just made will accumulate children of its own. If the workspace's structure makes leaf-level sharing impractical, the honest move is a dedicated Notion page tree for agent-readable content, with humans copying material into it. That is real work; it is less work than the alternative.
+**Fix:** run the subtree audit and compare its count against intent. Remove the connection from the parent, add it to the specific pages, and re-run. Then make the audit periodic, because the leaf-level grant you just made will accumulate children of its own. On an Enterprise plan, close the door as well as sweeping up behind it: set **Who can manage page access** to **Connection owners only** and restrict which connections members may install, both from `Settings` → `Connections` → `Manage` (step 6 has the full path). That is the difference between this failure recurring monthly and it recurring once. Below Enterprise the control does not exist and the audit is the whole defence. If the workspace's structure makes leaf-level sharing impractical, the honest move is a dedicated Notion page tree for agent-readable content, with humans copying material into it. That is real work; it is less work than the alternative.
 
 ### A page the user is looking at right now returns 404
 
@@ -269,7 +293,7 @@ The Drive rows are a real choice; the Notion row is a constraint. That asymmetry
 
 **Cause:** the default item collection is the user's own corpus. Shared drive items are excluded unless you say otherwise, and Drive's documentation is explicit that you must set `corpora` to reach collections beyond the default.
 
-**Fix:** set `corpora`, `includeItemsFromAllDrives=true`, and `supportsAllDrives=true` together. Setting one or two of the three is the common mistake and produces the same empty result as setting none.
+**Fix:** set `corpora`, `includeItemsFromAllDrives=true`, and `supportsAllDrives=true` together. Setting one or two of the three is the common mistake and produces the same empty result as setting none. Use `corpora=drive` with a `driveId` rather than `corpora=allDrives` — Google's `files.list` reference asks you to prefer `user` or `drive` for efficiency — and read `incompleteSearch` on the response, because a `true` there means results are missing and a listing you present as an inventory is not one.
 
 ### The Notion agent's writes stop working and nothing was deployed
 
@@ -285,7 +309,7 @@ The Drive rows are a real choice; the Notion row is a constraint. That asymmetry
 
 **Cause:** every nested block level is another request, and Notion applies an average of three requests per second per connection *plus* a separate per-workspace limit shared across all connections. A depth-first walk with no pacing blows through both.
 
-**Fix:** rate limit on the way out, not on the way back. The example script gates every call through a single throttle at one third of a second and honours `Retry-After` on 429 and 529. Cap depth explicitly — `MAX_DEPTH` in the example — and keep a `seen` set, because a Notion tree with a linked structure can otherwise be walked more than once.
+**Fix:** rate limit on the way out, not on the way back. The example script gates every call through a single throttle that paces *below* the documented average — a 0.4 second base with 0.1 seconds of jitter, rather than the 0.333 seconds that would target the average itself and put half your requests over it — and honours `Retry-After` on 429 and 529. Cap depth explicitly — `MAX_DEPTH` in the example — and keep a `seen` set, because a Notion tree with a linked structure can otherwise be walked more than once.
 
 ### Drive quota disappears into listing and downloading
 
@@ -301,7 +325,7 @@ The Drive rows are a real choice; the Notion row is a constraint. That asymmetry
 
 **Cause:** exporting a Google Sheet to `text/csv` yields one sheet. The other tabs were never fetched, and nothing in the response says so.
 
-**Fix:** detect `application/vnd.google-apps.spreadsheet` and refuse the naive path. Either read the workbook through the Sheets API, which addresses ranges per sheet, or state in the agent's output which sheet was read. An agent that says "based on sheet 1 of 4" is useful; one that silently averages a third of the data is worse than no agent.
+**Fix:** detect `application/vnd.google-apps.spreadsheet` and refuse the naive path. Either read the workbook through the Sheets API, which addresses ranges per sheet, or put the limitation in the returned content where the model will see it — `read_text()` in the example prefixes the CSV with `PARTIAL_SHEET_MARKER`, a line stating that other sheets were not read. An agent that says "based on sheet 1 of 4" is useful; one that silently averages a third of the data is worse than no agent.
 
 ## Doing this at scale
 
@@ -354,13 +378,17 @@ Primary sources for everything asserted above:
 - [Overview of the Google Picker](https://developers.google.com/workspace/drive/picker/guides/overview) — what the Picker is, the recommendation to pair it with `drive.file`, and the desktop and mobile restriction to `drive.file` only.
 - [Integrate the Google Picker into web apps](https://developers.google.com/workspace/drive/picker/guides/web-picker) — `setOAuthToken` and the scope required for the views.
 - [Google Picker DocsView reference](https://developers.google.com/workspace/drive/picker/reference/picker.docsview) — `setMimeTypes`, `setParent`, `setIncludeFolders`, and `setSelectFolderEnabled`.
-- [Search for files and folders](https://developers.google.com/workspace/drive/api/guides/search-files) — the `q` syntax and the `corpora`, `driveId`, `includeItemsFromAllDrives`, and `supportsAllDrives` parameters.
+- [Search for files and folders](https://developers.google.com/workspace/drive/api/guides/search-files) — the `q` query syntax and the `corpora` parameter.
+- [`files.list` REST reference](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/list) — `driveId`, `includeItemsFromAllDrives`, `supportsAllDrives`, and `incompleteSearch`, and the instruction to prefer `user` or `drive` over `allDrives` for efficiency. These are not on the search guide; that link covers `q` and `corpora` only.
+- [Manage shared drives](https://developers.google.com/workspace/drive/api/guides/manage-shareddrives) — the note that service accounts do not belong to your Workspace domain, so domain-wide sharing does not reach them.
 - [Download and export files](https://developers.google.com/workspace/drive/api/guides/manage-downloads) — `alt=media`, `files.export`, and the 10 MB export limit.
 - [Resolve errors](https://developers.google.com/workspace/drive/api/guides/handle-errors) — the `appNotAuthorizedToFile`, `insufficientFilePermissions`, `userRateLimitExceeded`, and `rateLimitExceeded` reason strings and the backoff guidance.
 - [Drive API usage limits](https://developers.google.com/workspace/drive/api/guides/limits) — the per-minute quota ceilings and the per-method unit costs.
 - [Notion integration capabilities](https://developers.notion.com/reference/capabilities) — the capability names and the statement that a connection follows the page access of the user who added it.
 - [Notion authorization](https://developers.notion.com/docs/authorization) — internal versus public connections, the OAuth endpoints, and the statement that access to a parent page provides access to all available child pages.
 - [Build an internal connection](https://developers.notion.com/guides/get-started/internal-connections) — the sharing steps, the requirement to share before any request succeeds, and the inheritance sentence quoted above.
+- [Notion search endpoint](https://developers.notion.com/reference/post-search) — that search covers parent and child pages and data sources shared with a connection, and that results respect the connection's capabilities.
 - [Notion API status codes](https://developers.notion.com/reference/status-codes) — the `object_not_found`, `restricted_resource`, `rate_limited`, and `missing_version` error codes.
+- [Add and manage connections in Notion](https://www.notion.com/help/add-and-manage-connections-with-the-api) — the `Settings` → `Connections` → `Manage` → `•••` → `Manage page access` path, the **Who can manage page access** values, the ability to restrict which connections members may install, and that both are Enterprise-plan controls.
 - [Notion request limits](https://developers.notion.com/reference/request-limits) — the three-requests-per-second average, the per-workspace limit, `Retry-After`, and the payload size caps.
 - [Notion changelog](https://developers.notion.com/page/changelog) — the current `Notion-Version` value, the `2025-09-03` data source change, and the `ntn_` token prefix.
