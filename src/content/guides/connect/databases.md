@@ -26,7 +26,7 @@ howTo:
   - name: Carry the acting user's identity into the session
     text: Open a transaction and call set_config('app.acting_user_id', $1, true) so the identity is a bound parameter and expires with the transaction.
   - name: Enable and force row-level security
-    text: Run ALTER TABLE ... ENABLE ROW LEVEL SECURITY and ALTER TABLE ... FORCE ROW LEVEL SECURITY, then create a policy for the table's owning role and one for the agent that reads the session variable.
+    text: Run ALTER TABLE ... ENABLE ROW LEVEL SECURITY and ALTER TABLE ... FORCE ROW LEVEL SECURITY, create a permissive policy for the table's owning role and one for the agent that reads the session variable, and keep the owning role NOLOGIN.
   - name: Expose parameterized tools instead of a SQL box
     text: Ship a fixed set of functions with bound parameters and validated arguments, and reserve generated SQL for the cases where the question space is genuinely open.
   - name: Log the query and the user who caused it
@@ -44,6 +44,8 @@ faq:
     answer: Most often the query goes through a view. A view resolves its base tables with the privileges and policies of the view owner unless it was created WITH (security_invoker = true), which PostgreSQL 15 added. The other common cause is that the agent connects as the table owner, who is exempt from policies unless the table has ALTER TABLE ... FORCE ROW LEVEL SECURITY.
   - question: Why does my application read zero rows after enabling FORCE ROW LEVEL SECURITY?
     answer: Because FORCE subjects the table's owner to its policies too, and a table with FORCE and no policy matching the owner default-denies against it. The owning role reads nothing and every write fails with "new row violates row-level security policy". Add a policy for the owner in the same migration, such as CREATE POLICY app_owner_all ON public.orders FOR ALL TO app_owner USING (true) WITH CHECK (true). This never reproduces when you test as a superuser, because superusers bypass row-level security regardless of FORCE.
+  - question: What does FORCE ROW LEVEL SECURITY actually protect against?
+    answer: Less than it appears. FORCE changes the behaviour of one role, the table's owner, and only to the extent that the owner's own policy is narrow. Since the owner needs a permissive policy for migrations to work, and can in any case run ALTER TABLE ... DISABLE ROW LEVEL SECURITY and DROP POLICY as ownership rights no policy can revoke, FORCE does not contain the owner. What it buys is that the owner's access becomes an explicit predicate you can read and narrow instead of a silent exemption. The agent is contained by ENABLE plus its own policy, not by FORCE. Keep the owning role NOLOGIN and connect the application as a separate non-owner role.
   - question: Can the agent turn off the statement timeout you set with ALTER ROLE?
     answer: Yes. statement_timeout has a context of user in pg_settings, so any session can raise it or set it to zero. ALTER ROLE gives you a safe default, not an enforced ceiling. Enforce the real limit outside the session, at the connection pooler or proxy, and make privileges rather than timeouts the thing the agent cannot change.
 ---
@@ -51,7 +53,7 @@ faq:
 ## TL;DR
 
 - A read-only role is not containment. It reads every row of every table you granted it, and one generated cross join can saturate the server. Read-only limits verbs, not blast radius.
-- The layers that hold, in order: a login role that belongs to the agent alone, a read replica, `GRANT SELECT` on named relations, `ALTER ROLE ... SET statement_timeout`, row-level security keyed to the acting user, and a fixed set of parameterized tools. Watch one edge on the way in: `FORCE ROW LEVEL SECURITY` applies to the table's owner too, so forcing a table without also giving its owning role a policy default-denies against your own application — reads empty, writes rejected — and testing as a superuser will not show you.
+- The layers that hold, in order: a login role that belongs to the agent alone, a read replica, `GRANT SELECT` on named relations, `ALTER ROLE ... SET statement_timeout`, row-level security keyed to the acting user, and a fixed set of parameterized tools. Watch one edge on the way in: `FORCE ROW LEVEL SECURITY` applies to the table's owner too, so forcing a table without also giving its owning role a policy default-denies against your own application — reads empty, writes rejected — and testing as a superuser will not show you. Give the owner a permissive policy, then keep the owner `NOLOGIN`, because that policy is what stops `FORCE` containing it.
 - Carry the end user's identity with `SELECT set_config('app.acting_user_id', $1, true)` and read it in policies as `NULLIF(current_setting('app.acting_user_id', true), '')::bigint`. `SET` cannot take a bound parameter, which is why the obvious alternative is string concatenation.
 - Parameterized queries do not stop prompt injection in a text-to-SQL agent. Placeholders keep a value from becoming SQL. Here the attacker's text becomes SQL by way of the model, upstream of any placeholder.
 - For most product features, ship a fixed tool set rather than a SQL box. Text-to-SQL earns its risk only for open-ended analyst questions, over a replica, under per-user policies, with a human reading the answer before anything acts on it.
@@ -76,7 +78,7 @@ Those three combine badly. The layers below address them separately, because no 
 
 One path, start to finish: a constrained role, a policy keyed to the acting user, and two tools instead of a SQL prompt. Every statement here was executed against PostgreSQL 17.11 exactly as written.
 
-One assumption runs through all of it. The application's tables are owned by an ordinary non-superuser role, called `app_owner` below, and the agent's role is a second, weaker role. Build the example as a superuser and step 6 cannot be demonstrated at all, because a superuser bypasses every policy you write. `examples/connect-databases/setup_agent_role.sql` therefore runs its object-creation section under `SET ROLE app_owner`; the file's header names which statements need superuser and which do not. The other sources are `examples/connect-databases/checks.sql` (the CI assertions), `examples/connect-databases/prove_rls.sql` (the transcript), `examples/connect-databases/view_ownership.sql`, and `examples/connect-databases/query_tools.py`.
+One assumption runs through all of it: three roles, not one. `app_owner` owns the tables and is `NOLOGIN` — a migration identity with no connection string. `app_rw` is what the application connects as at runtime, holding DML grants but owning nothing. `agent_readonly` is the agent's own role, and is the subject of everything below. Build the example as a superuser instead and step 6 cannot be demonstrated at all, because a superuser bypasses every policy you write. `examples/connect-databases/setup_agent_role.sql` therefore runs its object-creation section under `SET ROLE app_owner`; the file's header names which statements need superuser and which do not. The other sources are `examples/connect-databases/checks.sql` (the CI assertions), `examples/connect-databases/prove_rls.sql` (the transcript), `examples/connect-databases/view_ownership.sql`, and `examples/connect-databases/query_tools.py`.
 
 ### 1. Create a login role that belongs to the agent alone
 
@@ -184,18 +186,37 @@ ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders FORCE ROW LEVEL SECURITY;
 ```
 
-`ENABLE` alone leaves a hole. PostgreSQL's [row security documentation](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) says table owners "normally bypass row security as well", and `FORCE` is what subjects the owner to its own policies. If the agent's connection string ever points at the owner role — a copy-pasted DSN, a migration user, a local development shortcut that reached staging — `ENABLE` without `FORCE` protects nothing. Note the limit: `FORCE` does not constrain a superuser or a role with `BYPASSRLS`, which "always bypass the row security system".
+`ENABLE` alone leaves the owner exempt. PostgreSQL's [row security documentation](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) says table owners "normally bypass row security as well", and `FORCE` is what subjects the owner to its own policies. Note the limit up front: `FORCE` does not constrain a superuser or a role with `BYPASSRLS`, which "always bypass the row security system".
 
-**Do not ship those two statements on their own.** "Its own policies" presupposes the owner has policies, and a table with `FORCE` and no policy matching the owner default-denies against it — the same default-deny that protects you from an unidentified agent now points at your application. On a table owned by an ordinary non-superuser role, which is what a real deployment looks like, `SELECT count(*) FROM public.orders` as the owner returns `0` and every write fails with `new row violates row-level security policy for table "orders"`. Reads empty, writes rejected, no configuration changed: the application is simply down. PostgreSQL's docs do not warn about this, and it does not reproduce at all if you test as a superuser, because superusers bypass RLS whatever `FORCE` says.
+Be precise about what that is worth, because the next paragraph takes most of it back. **`FORCE` is not what contains the agent.** `ENABLE` plus the agent's own policy does that, and it does it whether or not `FORCE` is set, because the agent is not the owner. `FORCE` changes the behaviour of exactly one role: the one that owns the table.
 
-So give the application's own role a policy in the same migration that turns `FORCE` on, before anything reads the table:
+**Do not ship those two statements on their own.** "Its own policies" presupposes the owner has policies, and a table with `FORCE` and no policy matching the owner default-denies against it — the same default-deny that protects you from an unidentified agent now points at your own migrations. On a table owned by an ordinary non-superuser role, which is what a real deployment looks like, `SELECT count(*) FROM public.orders` as the owner returns `0` and every write fails with `new row violates row-level security policy for table "orders"`. Reads empty, writes rejected, no configuration changed: the application is simply down. PostgreSQL's docs do not warn about this, and it does not reproduce at all if you test as a superuser, because superusers bypass RLS whatever `FORCE` says.
+
+So give the owning role a policy in the same migration that turns `FORCE` on, before anything reads the table:
 
 ```sql
 CREATE POLICY app_owner_all ON public.orders
     FOR ALL TO app_owner USING (true) WITH CHECK (true);
 ```
 
-`FOR ALL` covers `SELECT`, `INSERT`, `UPDATE` and `DELETE`; `USING` governs which existing rows the owner sees and `WITH CHECK` which new rows it may write. `WITH CHECK` is optional here — omit it and PostgreSQL applies the `USING` expression to new rows as well — but write it out, because the moment you narrow `USING` to something other than `true` you want the write rule to be a decision rather than an inherited default. This is not a hole in the containment — `app_owner` is the role that already owns the data, and the agent's role gets a separate, narrow policy below. What it buys is that `FORCE` now means "the owner is governed by an explicit policy" instead of "the owner is locked out". `examples/connect-databases/checks.sql` asserts this property across every forced table, and it is the first assertion in the file because it is the one that takes production down rather than leaking from it.
+`FOR ALL` covers `SELECT`, `INSERT`, `UPDATE` and `DELETE`; `USING` governs which existing rows the owner sees and `WITH CHECK` which new rows it may write. `WITH CHECK` is optional here — omit it and PostgreSQL applies the `USING` expression to new rows as well — but write it out, because the moment you narrow `USING` to something other than `true` you want the write rule to be a decision rather than an inherited default. `examples/connect-databases/checks.sql` asserts every forced table has such a policy, and it is the first assertion in the file because this is the mistake that takes production down rather than leaking from it.
+
+Now say the uncomfortable part out loud, because a permissive owner policy is behaviourally identical to no `FORCE` at all. Connect as `app_owner` after running the setup and you get every order, every account, and `billing_email`, with no identity set — verified. The owner can also run `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` and `DROP POLICY`, which no policy can prevent, because those are ownership rights rather than row rights.
+
+So here is the honest accounting, and it is the sentence to take away from this step: **`FORCE` plus a permissive owner policy does not contain the owner; what it buys is that the owner's access is an explicit predicate you can read, grep and narrow instead of a built-in exemption you cannot, and the thing that actually keeps an owner-shaped connection out of your system is that the owner never logs in.**
+
+Which is a design instruction, not a footnote. In `setup_agent_role.sql` the owner is `NOLOGIN` with no password, nothing is a member of it, and only a superuser can `SET ROLE` to it — so there is no owner DSN to copy into an agent, a cron job, or a staging config. The application connects as `app_rw`, a separate login role holding ordinary DML grants and the same `USING (true)` policy, because an application serving every tenant legitimately reads every tenant. The difference is not what the two roles can see. It is that `app_rw` does not own the tables, so its attempts to take the containment apart fail:
+
+```text
+app=> ALTER TABLE public.orders DISABLE ROW LEVEL SECURITY;
+ERROR:  must be owner of table orders
+app=> DROP POLICY orders_acting_user ON public.orders;
+ERROR:  must be owner of relation orders
+```
+
+If your application currently connects as the role that owns its tables — which is the default in most projects that never thought about it — that is the thing to change, and it is worth more than the `FORCE` line that led you here. Assertion 4 in `checks.sql` fails the build if `app_owner` can log in.
+
+A narrower owner predicate is the obvious alternative. Do not reach for it. `USING (true)` is right for a role whose job is migrations, backfills and incident repair: any predicate narrow enough to be worth writing is one a migration eventually violates, at which point somebody widens it under time pressure and nobody narrows it again. Keep the owner permissive, keep it offline, and spend the effort on the agent's policy, which is the one guarding data against a caller you do not control.
 
 Then the policy:
 
@@ -361,6 +382,8 @@ Text-to-SQL earns its risk in one shape: an internal analyst tool, over an analy
 - [ ] Agent traffic resolves to a read replica, verified by `SELECT pg_is_in_recovery()` returning true from the agent's own connection.
 - [ ] Every table holding per-user or per-tenant data has both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`.
 - [ ] Every table with `FORCE` also has a policy covering its owning role, verified before deploy — `FORCE` with no owner policy default-denies against your own application, emptying its reads and rejecting its writes.
+- [ ] The role that owns the tables is `NOLOGIN`, has no password, and has no members. It holds a permissive policy and can disable RLS outright, so there must be no connection string that reaches it.
+- [ ] The application connects as a role that does not own its tables, so `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` and `DROP POLICY` fail for it with `must be owner of table`.
 - [ ] Lookup and tenant-listing tables are covered too, not just the table holding the interesting rows. A column grant hides a column; it does not stop the agent enumerating every tenant.
 - [ ] Every policy reads the identity as `NULLIF(current_setting('app.acting_user_id', true), '')::bigint` or the equivalent for its key type.
 - [ ] The identity is set with `set_config(..., true)` inside the transaction that uses it, never with a concatenated `SET` and never session-scoped on a pooled connection.
@@ -380,7 +403,7 @@ Text-to-SQL earns its risk in one shape: an internal analyst tool, over an analy
 
 **Cause:** either the querying role is not subject to the policies, or the rows are being fetched on behalf of a role that sees more than it does.
 
-The first has three forms: the connection is the table owner's and the table has `ENABLE` but not `FORCE ROW LEVEL SECURITY`; the role holds `BYPASSRLS`, often granted by someone debugging a policy that "wasn't working"; or the role is a superuser.
+The first has four forms. The connection is the table owner's and the table has `ENABLE` but not `FORCE ROW LEVEL SECURITY`. The connection is the table owner's, `FORCE` *is* set, and the owner holds the permissive `app_owner_all` policy from step 6 — the configuration this guide ships, and the reason step 6 insists the owner be `NOLOGIN`. The role holds `BYPASSRLS`, often granted by someone debugging a policy that "wasn't working". Or the role is a superuser. Note that the second form also arrives through role membership: `GRANT app_owner TO someone` hands that someone the owner's policy on every forced table.
 
 The second is a view without `security_invoker`, and it is worth separating out because it bites even when the first three are all clean. Such a view returns the *owner's* row set, and under the configuration step 6 prescribes the owner holds a permissive `app_owner_all` policy — so the owner sees every row, and so does anyone you grant the view to. The owner does not have to bypass RLS for this to leak; it only has to be allowed to see more than the caller, which is the normal state of affairs for an application role.
 

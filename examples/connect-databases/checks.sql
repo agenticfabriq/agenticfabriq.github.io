@@ -6,10 +6,11 @@
 -- so the behavioural assertions below would pass vacuously for one.
 -- Exits 0 when every assertion holds and 3 on the first failure.
 --
--- These are the checklist items from the guide, made executable. Assertions 1
--- and 2 are the two that catch the mistakes most likely to reach production:
--- a table forced into RLS with no policy for its own owner, and a view that
--- resolves its base tables as the owner rather than the caller.
+-- These are the checklist items from the guide, made executable. Assertions 1,
+-- 2 and 4 are the ones that catch the mistakes most likely to reach production:
+-- a table forced into RLS with no policy for its own owner, a view that resolves
+-- its base tables as the owner rather than the caller, and a table-owning role
+-- that can be connected to directly.
 --
 -- Verified against PostgreSQL 17.11.
 
@@ -66,7 +67,21 @@ BEGIN
     END IF;
 END $$;
 
-\echo '4. every table carrying per-user data has RLS enabled and forced'
+\echo '4. the owner of the tables cannot log in'
+DO $$
+DECLARE can_login boolean;
+BEGIN
+    SELECT rolcanlogin INTO can_login FROM pg_roles WHERE rolname = 'app_owner';
+    IF can_login IS NULL THEN
+        RAISE EXCEPTION 'role app_owner does not exist';
+    END IF;
+    IF can_login THEN
+        RAISE EXCEPTION
+            'app_owner can log in. It holds a permissive policy on every forced table and can DISABLE ROW LEVEL SECURITY, so there must be no connection string for it.';
+    END IF;
+END $$;
+
+\echo '5. every table carrying per-user data has RLS enabled and forced'
 DO $$
 DECLARE bad text;
 BEGIN
@@ -83,7 +98,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo '5. an unidentified session sees nothing'
+\echo '6. an unidentified session sees nothing'
 DO $$
 DECLARE n bigint;
 BEGIN
@@ -98,7 +113,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo '6. each user sees exactly their own rows and never the other user rows'
+\echo '7. each user sees exactly their own rows and never the other user rows'
 DO $$
 DECLARE got bigint[];
 BEGIN
@@ -125,7 +140,7 @@ BEGIN
     PERFORM set_config('app.acting_user_id', NULL, false);
 END $$;
 
-\echo '7. the excluded column is not readable, even to an identified session'
+\echo '8. the excluded column is not readable, even to an identified session'
 DO $$
 BEGIN
     PERFORM set_config('app.acting_user_id', '1', false);
