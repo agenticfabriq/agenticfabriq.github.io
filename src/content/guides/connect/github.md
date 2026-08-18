@@ -213,13 +213,12 @@ created = call(
         "head": branch,
         "base": base,
         "body": "Opened by an automation. Nothing merges without a human approval.",
-        "draft": True,
         "maintainer_can_modify": True,
     },
 )
 ```
 
-`title`, `head`, and `base` are the parameters that matter; `draft` and `maintainer_can_modify` are optional and both are worth setting. A 422 here means validation failed — most often a head branch with no difference from base, or an open pull request that already exists for that pair.
+`title`, `head`, and `base` are the parameters that matter. A 422 here means validation failed — most often a head branch with no difference from base, or an open pull request that already exists for that pair. `draft` is the third cause and the confusing one: draft pull requests on private repositories have historically required a paid plan, and GitHub's current pull request page carries no availability note either way, so treat a 422 that appears only when you set `draft` as a plan problem and confirm it against your own account rather than against a blog post. The example leaves `draft` unset for that reason.
 
 The reason this matters is not politeness. A pull request produces a diff, a reviewer, a conversation, and a revert button. A push to the default branch produces a deploy. Both are `contents: write`; only one of them is reviewable.
 
@@ -248,9 +247,11 @@ Handle the 401 case as success. A token that already expired is a token that is 
 | Personal access token (classic) | Legacy tooling that cannot do anything else. Not a default. | The human who created it. Agent and person are indistinguishable. | Coarse scopes over every repository in every organization the human can reach; no read-only scope for private repositories. | No expiration requirement; owners lack direct visibility into individual tokens. |
 | Fine-grained personal access token | A one-off script owned by a named person, in one organization, where GitHub recommends it over the classic token. | Still the human. Better logged, same conflation. | Per-repository selection plus per-resource read/write permissions, limited to a single user or organization. | 1 to 366 days or no expiration, subject to org policy; owners can view and revoke individual tokens and can require approval. |
 | GitHub App installation token | Unattended agents. The default for anything running on a schedule or a webhook. | The app, not a person. Distinguishable from human activity in history and logs. | Installation-level repository selection, narrowed further per token by `repositories` and `permissions`. | One hour, automatic; owners can suspend or uninstall the installation. |
-| GitHub App user access token | The agent is acting on one human's explicit request and the action should be recorded as theirs. | The user and the app. | Bounded by both the installation's permissions and the user's own access. | 8 hours, with a refresh token valid for 6 months. |
+| GitHub App user access token | The agent is acting on one human's explicit request and the action should be recorded as theirs. | The user and the app. | Bounded by both the installation's permissions and the user's own access. | 8 hours *by default*, with a refresh token valid for 6 months — but expiration is an app setting you can opt out of, and an app that has opted out receives a token that never expires and no refresh token at all. |
 
 That last row is the honest counterweight to this guide's argument. An installation token attributes activity to the app, which is what you want for a nightly dependency bump and not what you want for "the agent merged this because Priya asked it to". GitHub's best-practice page is unambiguous: if your GitHub App takes an action on behalf of a user, it should always use a user access token instead of an installation access token. If you stay on installation tokens for operational reasons, the mapping from action to requesting human is now yours to record, and nobody will build it for you after the incident.
+
+The fourth thing you can register on GitHub, the OAuth app, is missing from that table deliberately, and the reason is the answer to "should I build an OAuth app or a GitHub App for my agent?". An OAuth app can only act on behalf of a user; it has no independent identity, so every one of the classic PAT's attribution problems comes with it. It authorizes against the same coarse OAuth scopes a classic token uses — including the same all-or-nothing `repo` — and its tokens carry the `gho_` prefix, which GitHub's credential reference lists as long-lived with manual revocation. The organization control is the sharpest difference: an owner approves or denies an entire application for the whole organization, and turning restrictions on makes previously approved apps lose access to the organization's resources immediately. There is no per-token revocation, no per-repository selection, and no way to grant one installation less than another. For an agent, an OAuth app is a classic personal access token with an authorization screen in front of it.
 
 Note one detail that survives every organization policy choice. GitHub states that regardless of the personal-access-token policy an organization sets, personal access tokens will have access to public resources within the organization. Restricting token access protects private repositories; it does not make the organization opaque.
 
@@ -284,7 +285,9 @@ Note one detail that survives every organization policy choice. GitHub states th
 
 **Cause:** the token lacks a permission the endpoint requires. The corresponding message for a fine-grained token is `Resource not accessible by personal access token`. Neither is a rate limit and neither will clear on retry.
 
-**Fix:** read `X-Accepted-GitHub-Permissions` off that response, which lists the permission sets that would have worked. Add the smallest one, and note that adding a permission to an installed app does not apply retroactively — the installation has to accept the new permission before tokens carry it, so the fix involves the organization, not just your code. Branch on the presence of that header rather than on the status code, since 403 also means throttling.
+**Fix:** read `X-Accepted-GitHub-Permissions` off that response, which lists the permission sets that would have worked. Add the smallest one, and note that adding a permission to an installed app does not apply retroactively — the installation has to accept the new permission before tokens carry it, so the fix involves the organization, not just your code.
+
+Do not use that header as your classifier, though. GitHub introduced it as the fine-grained counterpart to `x-accepted-oauth-scopes`, so that callers can discover which permissions a route needs, and documents it nowhere as exclusive to failures. Classify on the error message instead — GitHub's troubleshooting page names `Resource not accessible by integration` and `Resource not accessible by personal access token` for exactly this — and check the rate-limit signals first, because a 403 is also how throttling arrives. Use the header for the diagnosis it genuinely gives you, which is *which* permission was missing.
 
 ### 404 on a repository you can see in your browser
 
@@ -306,7 +309,7 @@ Note one detail that survives every organization policy choice. GitHub states th
 
 **Symptom:** none at first. Later, a secret appears somewhere it should not, and the commit that made it possible is a small, plausible change to a workflow file, authored by the app.
 
-**Cause:** the app holds `workflows: write`, or holds `contents: write` on a branch that CI runs from, and the agent processed untrusted text — an issue body, a pull request comment, a dependency's README — as if it were instruction. The secret was never read through the API. It was injected into a job the agent authored.
+**Cause:** the exfiltration path described at the end of *The problem*, reached from the other end. The app holds `workflows: write`, or holds `contents: write` on a branch CI runs from, and the agent treated untrusted text as instruction — an issue body, a pull request comment, a dependency's README, a code comment in a diff it was asked to review. Any of those is a channel into a model that also holds a credential.
 
 **Fix:** remove `workflows` from the app's permissions and keep it removed. Where CI genuinely must be agent-editable, split it: a separate app with a separate installation, `workflows: write`, no `contents: write` elsewhere, and a ruleset requiring code owner review on `.github/**`. Then keep the two credentials in different processes, because a single process holding both is a single injection away from holding their union.
 
@@ -316,7 +319,9 @@ Note one detail that survives every organization policy choice. GitHub states th
 
 **Cause:** GitHub's primary rate limit for a GitHub App installation is 5,000 requests per hour, or 15,000 if the installation is on a GitHub Enterprise Cloud organization. Installations with more than 20 repositories earn another 50 requests per hour per repository, and installations with more than 20 users another 50 per user, up to a documented ceiling of 12,500. Separately, secondary rate limits cap concurrency at 100 requests and content-generating requests at 80 per minute — and an agent opening pull requests in a loop is generating content.
 
-**Fix:** honour the signals in GitHub's documented order. If `retry-after` is present, wait that many seconds. Otherwise, if `x-ratelimit-remaining` is `0`, wait until `x-ratelimit-reset`, which is UTC epoch seconds. Otherwise wait at least a minute, and back off exponentially for secondary limits. `_sleep_for` in `examples/connect-github/open_pull_request.py` implements exactly that order. The structural fix is to stop polling: GitHub's guidance is to subscribe to webhook events instead of polling the API for data.
+For choosing between credential types rather than debugging one, the rest of the table matters: unauthenticated requests get 60 per hour; an authenticated user gets 5,000 per hour, which covers both classic and fine-grained personal access tokens and also governs GitHub App user access tokens, since their requests count against the user's own limit and are pooled with anything another app does on that user's behalf; `GITHUB_TOKEN` in Actions gets 1,000 per hour per repository. So rate limits are not a reason to prefer an app at small scale — a personal access token and an installation are both 5,000 an hour. They become one at large scale, because an installation scales upward as repositories and users are added and a personal account does not.
+
+**Fix:** honour the signals in GitHub's documented order. If `retry-after` is present, wait that many seconds. Otherwise, if `x-ratelimit-remaining` is `0`, wait until `x-ratelimit-reset`, which is UTC epoch seconds. Otherwise wait at least a minute, and back off exponentially for secondary limits. Note that the rate limit headers ride along with every response, so it is their values that carry information, not their presence — `_throttle_wait` in `examples/connect-github/open_pull_request.py` reads the values in that order and returns nothing when neither signal fires. The structural fix is to stop polling: GitHub's guidance is to subscribe to webhook events instead of polling the API for data.
 
 ### Every commit says the app's name and nobody knows who asked
 
@@ -324,11 +329,13 @@ Note one detail that survives every organization policy choice. GitHub states th
 
 **Cause:** an installation access token attributes activity to the app by design — that is the property that makes it better than a token on a person, and it is also the property that erases the requester. GitHub is explicit that installation tokens are useful for automations that act independently of users, and that user access tokens are the mechanism for attributing activity to a user.
 
-**Fix:** either move to user access tokens for user-initiated actions, or carry the requester yourself: put the requesting identity in the pull request body and commit trailer, and log the request id alongside the installation id in your own audit store. Do it at the moment of the request. Reconstructing it later from chat history is the work nobody has time for during an incident.
+**Fix:** either move to user access tokens for user-initiated actions, or carry the requester yourself: put the requesting identity in the pull request body and in a commit trailer, and log the request id alongside the installation id in your own audit store. Do it at the moment of the request; reconstructing it later from chat history is the work nobody has time for during an incident.
+
+Two things give an auditor a handle in the meantime. `GET /app`, authenticated with the app's JWT, returns the app's `slug`, which is the stable identifier to match against rather than the display name someone may rename. And on the commits endpoints, the top-level `author` is a GitHub account object carrying a `type` field, distinct from `commit.author`, which is raw Git metadata that need not correspond to any account at all — so machine-authored commits are separable from human ones without parsing a username. GitHub's schema does not enumerate the values `type` takes, so read it off your own data before writing a query against it.
 
 ## Doing this at scale
 
-The single-repository version above takes an afternoon. What it turns into is not more of the same, and the difference is worth naming before you commit to owning it.
+The single-repository version above takes an afternoon. What it turns into is not more of the same.
 
 The private key is the first thing that changes character. One app with one key is a secret in a vault. A dozen agents, each with its own app so that suspension is per-agent, is a dozen non-expiring keys that each mint hourly tokens for every installation of their app — and the two rotation events, planned and post-compromise, both require the second key to already exist. GitHub gives you 25 slots per app precisely so rotation is not an outage, but scheduling it, verifying the new key mints successfully before deleting the old one, and doing that across a fleet is a job somebody has to hold.
 
@@ -379,6 +386,10 @@ Primary sources for everything asserted above:
 - [Permissions required for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps) — which endpoints each permission gates, at which access level.
 - [Editing a GitHub App's permissions](https://docs.github.com/en/apps/maintaining-github-apps/editing-a-github-apps-permissions) — updated permissions do not take effect on an installation until that account approves them.
 - [Best practices for creating a GitHub App](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app) — minimum permissions, revoking tokens early, webhooks over polling, and installation versus user access tokens.
+- [Refreshing user access tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens) — the eight-hour default, the six-month refresh token, and what an app that opts out of expiration receives instead.
+- [About OAuth app access restrictions](https://docs.github.com/en/organizations/managing-oauth-access-to-your-organizations-data/about-oauth-app-access-restrictions) — approval and denial of an OAuth app for a whole organization, and what happens when restrictions are first enabled.
+- [X-Accepted-GitHub-Permissions header for fine-grained permission actors](https://github.blog/changelog/2023-08-10-x-accepted-github-permissions-header-for-fine-grained-permission-actors/) — the header's purpose, its semicolon-separated alternative sets, and its relationship to `x-accepted-oauth-scopes`.
+- [REST API endpoints for commits](https://docs.github.com/en/rest/commits/commits) — the distinction between the top-level `author` account object and `commit.author` Git metadata.
 - [GitHub credential types](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/github-credential-types) — the `ghp_`, `github_pat_`, `gho_`, `ghu_`, `ghs_`, and `ghr_` prefixes with each credential's lifetime and organization control.
 - [Managing your personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) — what a classic token reaches, and GitHub's recommendation of fine-grained tokens over it.
 - [Setting a personal access token policy for your organization](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization) — approval requirements, maximum lifetime policy, and the public-resources caveat.
