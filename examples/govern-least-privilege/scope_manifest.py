@@ -95,10 +95,11 @@ RETIRED: tuple[tuple[str, str, str], ...] = (
         "google",
         "https://www.googleapis.com/auth/gmail.modify",
         "Applying a label needs users.messages.modify, whose narrowest described "
-        "scope is gmail.modify -- which also grants compose and send. Dropped the "
-        "label_message tool instead. Google's method reference also lists "
-        "gmail.modify.restricted; revisit if its grant is ever documented. "
-        "Removed 2026-08-18.",
+        "scope for a per-user flow is gmail.modify -- which also grants compose "
+        "and send. Dropped the label_message tool instead. The third scope on "
+        "that method reference, gmail.modify.restricted, is the service-account "
+        "domain-wide-delegation path for administrators, not a narrower "
+        "alternative. Removed 2026-08-18.",
     ),
     (
         "slack",
