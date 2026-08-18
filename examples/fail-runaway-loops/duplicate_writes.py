@@ -3,7 +3,8 @@
 There is no outage here and no alert fires. The run succeeds, the logs look
 clean, and a month later somebody reconciling a ledger finds two rows.
 
-Four clients, same lost response, same retry:
+Three clients, same lost response, same retry -- then two cases where the key
+meets a request the server refuses:
 
     python3 duplicate_writes.py
 
@@ -18,7 +19,12 @@ import json
 import uuid
 from typing import Any
 
-from fake_provider import FakeProvider, TransportError, VirtualClock
+from fake_provider import (
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+    FakeProvider,
+    TransportError,
+    VirtualClock,
+)
 
 PARAMS: dict[str, Any] = {"invoice": "inv_2026_0042", "amount_cents": 129_00}
 
@@ -34,7 +40,7 @@ def operation_key(*, tenant: str, operation: str, params: dict[str, Any]) -> str
     The hash covers the parameters, so a genuinely different charge gets a
     different key while every retry of this one gets the same key. `tenant`
     keeps two customers' identical-looking operations apart. Stripe caps keys at
-    255 characters; this is 71.
+    255 characters; this one is 71.
 
     Do not put an email address, an account number, or anything else sensitive
     in the key. Stripe says so directly, and the key is echoed in logs and
@@ -44,7 +50,10 @@ def operation_key(*, tenant: str, operation: str, params: dict[str, Any]) -> str
         json.dumps(params, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:32]
     key = f"{tenant}:{operation}:{fingerprint}"
-    assert len(key) <= 255
+    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        # Not an assert: `python3 -O` strips those, and the one environment
+        # where asserts are stripped is production.
+        raise ValueError(f"idempotency key is {len(key)} chars, limit is {MAX_IDEMPOTENCY_KEY_LENGTH}")
     return key
 
 
@@ -115,7 +124,30 @@ def main() -> None:
     replan = provider.request("POST", "/charges", params=PARAMS, idempotency_key=stable)
     print("the agent re-plans and decides to charge the same invoice again")
     print(f"  {replan.status} replayed={replan.headers.get('Idempotent-Replayed')} {replan.body}")
+    print(f"  -> charges committed: {len(provider.charges)}\n")
+    assert len(provider.charges) == 1
+
+    # The agent writes its own request bodies, so a malformed write is routine
+    # rather than exceptional. Stripe stores a result only once an endpoint
+    # begins execution, so a validation failure leaves the key usable.
+    provider, _ = _new_provider()
+    key = operation_key(tenant="acme", operation="charge_invoice", params=PARAMS)
+    print("the model omits amount_cents, then the agent fixes it and retries the same key")
+    malformed = provider.request(
+        "POST", "/charges", params={"invoice": PARAMS["invoice"]}, idempotency_key=key
+    )
+    print(
+        f"  attempt 0: {malformed.status} {malformed.body['error']['type']}: "
+        f"{malformed.body['error']['message']}"
+    )
+    corrected = provider.request("POST", "/charges", params=PARAMS, idempotency_key=key)
+    replayed = corrected.headers.get("Idempotent-Replayed") == "true"
+    print(
+        f"  attempt 1: {corrected.status} "
+        f"{'(replayed)' if replayed else '(executed)'} {corrected.body}"
+    )
     print(f"  -> charges committed: {len(provider.charges)}")
+    assert corrected.status == 200 and not replayed
     assert len(provider.charges) == 1
 
 

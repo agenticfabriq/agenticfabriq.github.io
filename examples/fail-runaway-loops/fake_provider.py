@@ -27,6 +27,9 @@ https://docs.stripe.com/error-low-level#idempotency:
 * a second request arriving while the first is still executing conflicts, and
   Stripe's status table gives `409 Conflict` for "the request conflicts with
   another request (perhaps due to using the same idempotent key)";
+* a request whose parameters fail validation stores nothing, because the
+  endpoint never began execution -- so the caller may fix the parameters and
+  retry under the same key;
 * stored results are pruned after 24 hours, after which the key is new again.
 
 Run this file directly for a self-check of those semantics:
@@ -265,6 +268,9 @@ class FakeProvider:
             # A write with no key. The server has no way to deduplicate it, so
             # every retry is a new operation. This is the default, and it is why
             # duplicate records are the quietest failure in this guide.
+            invalid = self._validate(method, path, params)
+            if invalid is not None:
+                return self._answer(invalid, endpoint, lose_the_response)
             return self._answer(self._handle(method, path, params), endpoint, lose_the_response)
 
         if len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
@@ -314,6 +320,18 @@ class FakeProvider:
                     },
                 )
             )
+
+        # Validation runs before the idempotency layer stores anything. Stripe:
+        # "We save results only after the execution of an endpoint begins. If
+        # incoming parameters fail validation ... we don't save the idempotent
+        # result because no API endpoint initiates the execution. You can retry
+        # these requests." Storing a validation 400 would poison the key -- the
+        # caller fixes the parameters, retries, and gets an idempotency_error
+        # for a mistake that was theirs to correct. For an agent that is the
+        # common case, because the model writes the request.
+        invalid = self._validate(method, path, params)
+        if invalid is not None:
+            return self._answer(invalid, endpoint, lose_the_response)
 
         self._inflight.add(idempotency_key)
         try:
@@ -386,15 +404,31 @@ class FakeProvider:
             },
         )
 
+    def _validate(self, method: str, path: str, params: dict[str, Any]) -> Response | None:
+        """Reject malformed parameters before anything executes or is stored.
+
+        A response from here means the endpoint never began execution, so the
+        caller may fix the parameters and retry under the same key.
+        """
+        if method.upper() == "POST" and path == "/charges":
+            invoice = params.get("invoice")
+            amount = params.get("amount_cents")
+            if not isinstance(invoice, str) or not isinstance(amount, int):
+                return Response(
+                    400,
+                    {},
+                    {
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "invoice and amount_cents required",
+                        }
+                    },
+                )
+        return None
+
     def _create_charge(self, params: dict[str, Any]) -> Response:
-        invoice = params.get("invoice")
-        amount = params.get("amount_cents")
-        if not isinstance(invoice, str) or not isinstance(amount, int):
-            return Response(
-                400,
-                {},
-                {"error": {"type": "invalid_request_error", "message": "invoice and amount_cents required"}},
-            )
+        invoice = params["invoice"]
+        amount = params["amount_cents"]
         charge = {
             "id": f"ch_{len(self.charges) + 1:04d}",
             "invoice": invoice,
@@ -445,6 +479,27 @@ def _self_check() -> None:
     assert mismatch.status == 400
     assert mismatch.body["error"]["type"] == "idempotency_error"
 
+    # A validation failure stores nothing, so the key is still usable. This is
+    # the branch that decides whether a malformed write is recoverable, and for
+    # an agent that writes its own request bodies it is the branch that runs.
+    fixable_key = "run_1:step_9:charge"
+    bad = provider.request(
+        "POST", "/charges", params={"invoice": "inv_9"}, idempotency_key=fixable_key
+    )
+    assert bad.status == 400
+    assert bad.body["error"]["type"] == "invalid_request_error"
+    assert fixable_key not in provider._records, "a validation 400 must not be stored"
+    committed_before = len(provider.charges)
+    fixed = provider.request(
+        "POST",
+        "/charges",
+        params={"invoice": "inv_9", "amount_cents": 700},
+        idempotency_key=fixable_key,
+    )
+    assert fixed.status == 200, fixed
+    assert "Idempotent-Replayed" not in fixed.headers
+    assert len(provider.charges) == committed_before + 1
+
     with provider.concurrent_attempt("run_1:step_4:charge"):
         conflict = provider.request(
             "POST", "/charges", params=params, idempotency_key="run_1:step_4:charge"
@@ -452,11 +507,14 @@ def _self_check() -> None:
     assert conflict.status == 409, conflict
 
     # Same key, but 24 hours later: pruned, so it is a brand new request.
+    before_ttl = len(provider.charges)
     clock.sleep(IDEMPOTENCY_TTL_SECONDS)
     after_ttl = provider.request("POST", "/charges", params=params, idempotency_key=key)
     assert after_ttl.status == 200
     assert "Idempotent-Replayed" not in after_ttl.headers
-    assert len(provider.charges) == 2, "a pruned key is a new request, and that is the trap"
+    assert len(provider.charges) == before_ttl + 1, (
+        "a pruned key is a new request, and that is the trap"
+    )
 
     print("idempotency semantics self-check passed")
     print(provider.summary())
