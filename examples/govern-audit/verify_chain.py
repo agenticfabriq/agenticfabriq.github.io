@@ -151,14 +151,17 @@ def verify(path: str) -> list[str]:
         # fall back to *nothing*: an export that lost its columns must fail
         # rather than sail through a check that had no work to do and still
         # printed a clean bill of health.
+        #
+        # Count the comparisons actually made, not the size of the mapping. A
+        # non-empty `columns` whose every key is skipped below -- {"recorded_at":
+        # ...}, or a mapping of nothing but reserved keys -- performs zero
+        # comparisons, and testing the mapping for emptiness would pass it. That
+        # is the same failure this check exists to prevent, one level further in:
+        # a control that reports success while doing nothing.
         columns = line.get("columns")
         if columns is None:
             columns = {k: v for k, v in line.items() if k not in RESERVED_KEYS}
-        if not columns:
-            problems.append(
-                f"{record_id}: no columns to cross-check -- this record carries a "
-                "hash and nothing to compare against it. Re-export with export.sql."
-            )
+        compared = 0
         for field, value in sorted(columns.items()):
             if field in NOT_IN_CANONICAL_FORM or field in RESERVED_KEYS:
                 continue
@@ -168,12 +171,20 @@ def verify(path: str) -> list[str]:
                     "so it was never hashed and nothing vouches for it"
                 )
                 continue
+            compared += 1
             if value != body[field]:
                 problems.append(
                     f"{record_id}: column {field}={value!r} disagrees with "
                     f"canonical_form {body[field]!r} -- the queryable copy was "
                     "edited while the hashed bytes were left alone"
                 )
+
+        if compared == 0:
+            problems.append(
+                f"{record_id}: zero columns cross-checked -- this record carries a "
+                "hash and nothing that was compared against it. Re-export with "
+                "export.sql."
+            )
 
         # Chain from the values the record actually carries, not the ones it
         # should have carried. Otherwise a single break cascades into a failure

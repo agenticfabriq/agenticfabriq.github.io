@@ -99,10 +99,14 @@ CREATE TABLE audit.agent_action (
     -- bytes, store the bytes, verify the bytes.
     --
     -- The typed columns above are for querying. This column is the evidence.
-    -- export.sql re-renders every other column into its canonical spelling so
-    -- verify_chain.py can compare all of them against these bytes, so a
-    -- store whose queryable columns were edited while canonical_form was left
-    -- alone is still caught.
+    -- export.sql re-renders every column it ships into its canonical spelling
+    -- so verify_chain.py can compare those against these bytes, so a store
+    -- whose queryable columns were edited while canonical_form was left alone
+    -- is still caught. Not every column of this table: recorded_at is never
+    -- hashed (the emitter never sees it) and record_hash and canonical_form are
+    -- the evidence rather than the subject. Coverage is exactly what export.sql
+    -- lists, which is a hand-maintained list -- add a column here and to
+    -- export.sql in the same change, or it is stored and unvouched-for.
     canonical_form   text        NOT NULL,
     prev_hash        bytea,
     record_hash      bytea       NOT NULL,
@@ -275,14 +279,31 @@ BEGIN
             USING ERRCODE = 'serialization_failure';
     END IF;
 
-    -- Scoped by owner as well as chain_id. The SELECT above already refused a
-    -- chain this caller does not own, so this predicate is redundant on the
-    -- happy path -- and that is the point: it means a future edit that weakens
-    -- the guard cannot silently turn this into a write across ownership.
+    -- Scoped by owner as well as chain_id, and then checked. On the happy path
+    -- the SELECT above has already refused a chain this caller does not own, so
+    -- this predicate matches the same row and the check never fires.
+    --
+    -- The check is the control, not the predicate. A predicate alone narrows an
+    -- UPDATE; it does not refuse anything. Weaken the SELECT and the predicate
+    -- matches nothing, the UPDATE reports success over zero rows, and the INSERT
+    -- lands anyway: a non-owner's record is appended to someone else's chain
+    -- while chain_head silently stays put -- forgery accepted, plus a denial of
+    -- service on the real owner, whose next append then collides on
+    -- (chain_id, chain_seq). That is a control reporting success while doing
+    -- nothing, which is the exact shape of the SELECT INTO bug above.
+    --
+    -- FOUND after an UPDATE is false when no row was modified. Raising on it
+    -- turns a pointer that failed to move into a write that did not happen.
     UPDATE audit.chain_head
        SET head_hash = NEW.record_hash,
            seq       = NEW.chain_seq
      WHERE chain_id = NEW.chain_id AND owner = session_user;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'chain % head not advanced: no chain_head row owned by % -- refusing the append',
+            NEW.chain_id, session_user
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
 
     RETURN NEW;
 END;
