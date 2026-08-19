@@ -31,7 +31,7 @@ faq:
   - question: Should I start with broad scopes and narrow them later?
     answer: No, and in practice the narrowing never happens. Widening a grant is cheap and additive, while narrowing means revoking the grant, re-running consent, and risking a production break that nobody is rewarded for preventing. Start narrow, when the cost of being wrong is a stack trace during development.
   - question: How do I measure whether an agent's scopes are least privilege?
-    answer: Measure the fraction of granted scopes that produced at least one call in the last 30 days. Unexercised scope is the only over-grant you can remove without an argument, because the evidence, rather than an opinion, says it was unused.
+    answer: Measure the fraction of granted scopes that produced at least one call, reviewed every 30 days but evaluated over a window long enough to contain every periodic thing the agent does. Unexercised scope is the only over-grant you can remove without an argument, because the evidence, rather than an opinion, says it was unused.
   - question: Are an agent's tool definitions part of its permissions?
     answer: Yes. Every tool an agent can call is a permission you granted, because the model chooses when to call it and you chose what is callable. Adding a tool to the registry widens the agent's authority exactly as much as adding a scope does, so the tool list belongs in scope review.
   - question: What do you do when the narrowest scope a provider offers is still too broad?
@@ -44,7 +44,7 @@ faq:
 - Start broad and narrow later does not work, and the reason is organizational rather than technical. Widening is one additive consent; narrowing is a revocation, a re-consent, and a chance of breaking production that nobody gets credit for avoiding.
 - Scope granularity varies wildly by provider. Zendesk lets you ask for `tickets:write` and `users:read` and nothing else; Linear's `read` scope "will always be present" and covers the whole account. Same intent, no equivalent expression.
 - A scope says what kind of thing; a policy says which ones. Slack's `channels:history` covers "public channels that your Slack app has been added to" — the scope is half the grant and channel membership is the other half.
-- Measure the fraction of granted scopes exercised in the last 30 days. Unexercised scope is the metric that matters because it is the only over-grant you can delete without winning an argument.
+- Measure the fraction of granted scopes exercised, on a 30-day cadence over a window that contains every periodic thing the agent does. Unexercised scope is the metric that matters because it is the only over-grant you can delete without winning an argument.
 
 ## Who this is for
 
@@ -52,7 +52,7 @@ You are about to grant an agent access to a production system, or you have alrea
 
 ## The problem
 
-The advice is universal and the practice is rare, and that gap is the whole subject. Everyone agrees agents should hold minimum permissions. Almost every agent in production holds a scope nobody can justify. The reason is not that engineers disagree with least privilege; it is that the workflow that produces scopes runs in the opposite direction from the one that would fix them.
+The advice is universal and the practice is rare, and that gap is the whole subject. Everyone agrees agents should hold minimum permissions. Then a scope ships that nobody can justify, and nobody removes it. The reason is not that engineers disagree with least privilege; it is that the workflow that produces scopes runs in the opposite direction from the one that would fix them.
 
 Here is how a scope actually gets chosen. An engineer is integrating an agent at 6pm, a call returns 403, and the fastest way to make it stop is the scope at the top of the provider's list — the one that covers everything. The agent works. The pull request describes a feature, not a grant. Nobody in review has the provider's scope reference open, and the diff shows one changed string in a config file.
 
@@ -226,7 +226,9 @@ Running that file with `--check` rejects a row that names no tool, names no API 
 
 **Removed scopes stay in the file.** Deleting a line makes the question invisible to the next reader, who will ask it again and may answer it differently. The manifest keeps a retired section: the scope, and why it went. That is how "we tried `gmail.modify` and dropped the labelling feature instead" survives the departure of the person who decided it.
 
-**Measure the fraction exercised.** Every 30 days, ask one question of each agent: *of the scopes granted, what fraction produced at least one call?* Unexercised scope is the metric that matters, and the reason is political rather than technical. Every other over-grant argument is a judgement call — is `tickets:write` too much for an agent that only creates tickets? — and judgement calls stall. A scope with zero calls in 30 days has no counterparty. Nobody has to be persuaded it is unnecessary; the log says it was unused. Make removal the default outcome and keeping it require the same written justification as adding it.
+**Measure the fraction exercised.** Every 30 days, ask one question of each agent: *of the scopes granted, what fraction produced at least one call?* Unexercised scope is the metric that matters, and the reason is political rather than technical. Every other over-grant argument is a judgement call — is `tickets:write` too much for an agent that only creates tickets? — and judgement calls stall. A scope with zero calls has no counterparty. Nobody has to be persuaded it is unnecessary; the log says it was unused. Make removal the default outcome and keeping it require the same written justification as adding it.
+
+One caveat on the window, because it is where this metric produces a confidently wrong answer. Thirty days is the review cadence, not the evidence window: a scope exercised once a quarter is indistinguishable from a dead one inside thirty days, and deleting it is how you find out. Before you act on a zero, widen the window until it contains one of every periodic thing the agent does — a month-end close, a quarterly report — which is the same discipline [over-scoped OAuth](/fail/over-scoped-oauth/) applies to its own audit.
 
 Where the evidence comes from, and what it is worth:
 

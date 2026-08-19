@@ -266,7 +266,11 @@ Work through what the protocols actually give you. [RFC 7009 section 2.1](https:
 
 So per-resource, immediate revocation is not a thing the protocols hand you. It exists only if a decision point is consulted on every call. That is the strongest argument in this guide for call-time evaluation, and it is worth saying plainly rather than leaving as an implication: **the resource axis of revocation is a property of your decision layer, not of your tokens.**
 
-The sharper version of that claim is about granularity. A scope names a class — `graph:drive`, `channels:history` — so the finest revocation a token can express is *this user's whole class of resource*. A decision layer can name the instance, and stopping one agent from reading one document for one person while every other document in the same class keeps working is a thing no grant, on any provider in this pillar, can say. That is the concrete difference, and it is why the revocation table below matches an entry against both the instance and its class rather than only the class: a table that compared classes alone would accept a revoke naming one document, return without error, and change nothing.
+The sharper version of that claim is about granularity. An OAuth scope names a class — `graph:drive`, `channels:history` — so the finest revocation such a token can express is *this user's whole class of resource*. A decision layer can name the instance.
+
+Two things keep that honest, because some grants do name instances. A GitHub App installation token is narrowed to listed repositories at mint time, and AWS writes the object into an IAM policy's `Resource` and the caller into a session policy — which is why [designing least-privilege scopes](/govern/least-privilege/) calls IAM the model everything else is approximating. What none of them expresses is the *conjunction* the test asks for: GitHub's `repositories` list has no user in it, and an IAM policy that does have one is a policy rather than a grant a consent screen produced. The SaaS OAuth grants in this pillar cannot name an object at all.
+
+That is the concrete difference, and it is why the revocation table below matches an entry against both the instance and its class rather than only the class: a table that compared classes alone would accept a revoke naming one document, return without error, and change nothing.
 
 In the example, revocation is a table consulted inside `decide()`, keyed on all three parts with `None` meaning "any", and a resource entry naming either one instance or a whole class:
 
@@ -283,7 +287,7 @@ The next call for that document is refused, and nothing else is:
   allow success  oid:ravi   slack:channel/C-INC-402                read_history  agent_grant covers slack:channel:read_history, no user data reached
 ```
 
-Row two is the one to read twice. Same agent, same user, same resource class, same action, same delegation — and it is allowed, because the revocation named a document rather than a class. No scope string on any provider in this pillar can draw that line.
+Row two is the one to read twice. Same agent, same user, same resource class, same action, same delegation — and it is allowed, because the revocation named a document rather than a class. No OAuth scope string in this pillar can draw that line, because a scope names a class rather than an object.
 
 The class form is still there, and it is the blunter of the two:
 
