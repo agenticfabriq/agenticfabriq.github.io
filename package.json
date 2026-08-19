@@ -12,8 +12,10 @@
     "check:links": "node scripts/check-links.mjs",
     "og": "node scripts/generate-og.mjs",
     "check:og": "node scripts/check-og.mjs",
+    "readme": "node scripts/readme-index.mjs --write",
+    "check:readme": "node scripts/readme-index.mjs",
     "check:samples": "node scripts/check-samples.mjs",
-    "verify": "npm run build && npm run test && npm run lint:md && npm run check:links && npm run check:og && npm run check:samples"
+    "verify": "npm run build && npm run test && npm run lint:md && npm run check:links && npm run check:og && npm run check:readme && npm run check:samples"
   },
   "dependencies": {
     "@astrojs/rss": "4.0.19",

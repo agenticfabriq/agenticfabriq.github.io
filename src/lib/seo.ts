@@ -1,4 +1,7 @@
-export const SITE_URL = 'https://agenticfabriq.github.io';
+import { SITE_URL } from './site-urls.js';
+
+/** Re-exported so the origin has one definition the Node scripts can read too. */
+export { SITE_URL };
 export const PARENT_URL = 'https://agenticfabriq.com';
 export const SITE_NAME = 'Agent Integration Playbook';
 
