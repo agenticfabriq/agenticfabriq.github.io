@@ -38,7 +38,7 @@ faq:
   - question: Is prompt injection the main way AI agents fail?
     answer: It is one class of six, and it is the one that supplies capability rather than reach. An injection against a narrowly scoped agent reaches what the agent could already reach; the same injection against a broadly scoped one reaches everything the grant covers. Spend on the deterministic control first, because a call the credential cannot make does not happen regardless of what the model was persuaded to attempt.
   - question: What should you instrument on day one for an AI agent?
-    answer: A correlation id per task propagated to every tool call; one record per attempted call written at the policy decision point with both principals, the decision, and the outcome; a taint flag saying whether untrusted content was in the context; per-run counters for calls, tokens, spend, and wall clock; the granted permission set read from the provider rather than from source; and a kill switch read before every call.
+    answer: Six emissions, one per failure class. A correlation id per task propagated to every tool call; one record per attempted call written at the policy decision point with both principals, the decision, and the outcome; a taint flag saying whether untrusted content was in the context; per-run counters for calls, tokens, spend, and wall clock; the granted permission set read from the provider rather than from your source tree; and an estate row per agent naming an owner, an expiry, and the tools it can call. Add a kill switch read before every tool call, which is not instrumentation but belongs on the same day-one list.
   - question: Can one control fix more than one class of agent failure?
     answer: Yes, but not all six. Routing every tool call through one point collapses four things into single operations - credential sprawl, attribution, fleet-wide quotas and stop switches, and the inventory of what is registered and what it can reach. It does not narrow a grant that still exists, it does not stop untrusted content from being read as instructions, and it does not fix a planner with no terminating condition.
 ---
@@ -121,7 +121,7 @@ Control-flow failure is the partial exception, and only partial. It does eventua
 
 **Detect before it hurts.** Per-run aggregates, not per-second rates. Ten times the tool calls at the same requests-per-second, spread over ten times the duration, is identical on a rate graph. Alert on tool calls per run, tokens per run, and cost per run against a measured p99, add a cumulative daily spend alert per user below the hard cap, and emit which limit terminated each run so a rising count of one of them is a bug report rather than a surprise.
 
-**Structural prevention.** A hard run budget over four quantities at once — provider calls, tokens, money, wall clock — checked before every attempt, with retries counted against the same budget. One retry layer only. Backoff with full jitter, treating any server-supplied delay as a floor with randomness above it. A stable idempotency key derived from the operation rather than the attempt. A circuit breaker per dependency, shared across the pool. And a kill switch that stops one agent for one user without a deploy.
+**Structural prevention.** A hard run budget over four quantities at once — provider calls, tokens, money, wall clock — checked before every attempt, with retries counted against the same budget. One retry layer only. Backoff with full jitter, treating any server-supplied delay as a floor with randomness above it. A stable idempotency key derived from the operation rather than the attempt. A circuit breaker per (dependency, credential) pair, shared across the worker pool rather than held per process. And a kill switch that stops one agent for one user without a deploy.
 
 *The mismatch:* every quota, retry policy, and capacity plan you own assumes the call graph was fixed when the code was reviewed. Here it is generated at runtime by something that can be argued with.
 
@@ -135,7 +135,7 @@ The two combine into one product rather than two risks. [OWASP LLM06](https://ge
 
 **Detect before it hurts.** Record a taint flag on every action saying whether untrusted content was in the context, default it to true, and run two queries: denials where it is true, which are your controls catching what the content asked for, and successful *writes* where it is true, which is the list a human has to read. Alongside that, an egress record of the destination host of every outbound request the agent caused, so a domain nobody recognises is a query rather than an archaeology exercise.
 
-**Structural prevention.** Accept that the probabilistic half stays probabilistic — there is no known fool-proof prevention for prompt injection — and spend on the deterministic half. Narrow the grant, so a successful injection reaches less. Put the second principal in the request, so the agent's effective permissions are the intersection of what it may do and what its caller may do, never the union. Keep the destination list for anything that leaves outside the agent's own process, and do not auto-fetch URLs the model constructed from untrusted input.
+**Structural prevention.** Accept that the probabilistic half stays probabilistic — OWASP's own position is that "it is unclear if there are fool-proof methods of prevention for prompt injection" — and spend on the deterministic half. Narrow the grant, so a successful injection reaches less. Put the second principal in the request, so the agent's effective permissions are the intersection of what it may do and what its caller may do, never the union. Keep the destination list for anything that leaves outside the agent's own process, and do not auto-fetch URLs the model constructed from untrusted input.
 
 *The mismatch:* the human model assumes judgement separates instructions from data, and the service model assumes a parser does. A language model has one channel, and everything on it is eligible to be either.
 
@@ -219,21 +219,37 @@ Now the window is closed at both ends: from the earliest moment the document cou
   tasks (correlation ids) ... 1
   reads ..................... 22 over 22 distinct resources
   writes .................... 2
+  unclassified actions ...... 0
   denied .................... 1
     slack.channel:C0GENERAL  channel_allowlist: C0GENERAL is not a declared destination
   untrusted input in context. 23 record(s)
-  writes taken with untrusted input in context: 1   <- review by hand
-    2026-08-17T09:03:09.000100Z  slack.channel:C0ENG  send  for user:dana@example.com
+  actions taken with untrusted input in context, not reads: 1   <- review by hand
+    2026-08-17T09:03:09.000100Z  slack.channel:C0ENG  send  (write)  for user:dana@example.com
   bound: this covers calls that crossed the audited path. A credential used directly
          against the provider leaves no row here, so the provider's own log is the
          second source you still have to pull.
 ```
 
-Three things in that output do the work, and one of them is a refusal.
+Four things in that output do the work, and two of them are the tool declining to guess.
 
 The denial line is the most valuable row in the report, because it is the only evidence that a control was evaluated at all. Something in the injected instruction asked for a destination that was not on the declared list, and the policy said no. Without a record at the decision point that row would not exist, and the answer to "could we have stopped it" would be a shrug.
 
-The `bound` line is the honest limit. Your own records cover calls that crossed your own path. A credential used directly against the provider — by a debugging script, a second integration on the same client id, or whoever holds a copy — leaves nothing in them. So pull the provider's log as an independent source: Google Workspace records OAuth activity under the `token` application, where the `activity` event carries `api_name` and `method_name` for every call the client made. Two properties of that log decide how you read it, both documented and both easy to trip over: events are retained for six months, and the lag is up to a few hours, so the last few hours of your window will fill in after you have written the report.
+The `bound` line is the honest limit. Your own records cover calls that crossed your own path. A credential used directly against the provider — by a debugging script, a second integration on the same client id, or whoever holds a copy — leaves nothing in them. So pull the provider's log as an independent source: Google Workspace records OAuth activity under the `token` application, where the `activity` event carries `api_name` and `method_name` for every call the client made. Two properties of that log decide how you read it, both documented and both easy to trip over: events are retained for six months, and Google's lag table gives token log events as "A couple of hours", so the tail of your window will fill in after you have written the report. Read the row for the log you are actually querying — the same table gives different lags for different log types, and the OAuth row is not the slowest one.
+
+The `unclassified actions` line is the third. It reads zero here and it is not decoration, because `action` in the audit schema is free text with no controlled vocabulary — your store may well say `post_message` where this one says `send`. A tool that classifies anything it does not recognise as a read produces a shorter review list and no indication that it did so. Point the same window at a store using its own verbs:
+
+```text
+  reads ..................... 22 over 22 distinct resources
+  writes .................... 0
+  unclassified actions ...... 2  (verbs: post_message)
+    these are in neither WRITE_ACTIONS nor READ_ACTIONS. They are not counted as reads,
+    and the tainted ones are listed for review below. Add them to a vocabulary.
+  ...
+  actions taken with untrusted input in context, not reads: 1   <- review by hand
+    2026-08-17T09:03:09.000100Z  slack.channel:C0ENG  post_message  (unclassified)  for user:dana@example.com
+```
+
+The write count is now wrong, visibly, and the number that matters is unchanged: the one action a human has to read is still on the list. Declaring both vocabularies rather than defining reads as "not a write" is what buys that, and the direction of the error is deliberate — an unrecognised verb sends someone to read a row that may turn out to be harmless, where the alternative sends nobody to read a row that was a write.
 
 And the refusal. Run the same tool against a log that cannot support an answer and it declines to produce one:
 
@@ -257,7 +273,7 @@ Then the copies you do not control: ask the trace vendor, the helpdesk, and the 
 
 Three, and they close different classes. A fix that closes only one of them leaves the same incident available through a different door.
 
-**Narrow the grant.** `drive.readonly` is Google's "View and download all your Drive files", classified restricted; `drive.file` is "Create new Drive files, or modify existing files, that you open with an app or that the user shares with an app", and its reachable set is bounded by construction. The identical injection against a `drive.file` agent can instruct it to exfiltrate the document the user already handed it. Against the `drive.readonly` agent it can instruct a search of the whole corpus — [the over-scoped guide](/fail/over-scoped-oauth/) does the arithmetic, and lands at roughly 250,000 distinct documents across a 60-user pilot, 510× the corpus the agent was built to read per user. Same model, same prompt, different scope string, different incident. Narrowing is a re-consent rollout with cohorts and a force-revoke date, except on GitHub, which documents that "if you remove permissions or webhooks from your GitHub App, the changes will take effect immediately" — no user in the loop, and therefore no excuse for deferring it.
+**Narrow the grant.** `drive.readonly` is Google's "View and download all your Drive files", classified restricted. `drive.file` is, in full, "Create new Drive files, or modify existing files, that you open with an app or that the user shares with an app while using the Google Picker API or the app's file picker" — and the trailing clause is the whole claim, because the picker *is* the access mechanism. `drive.file` does not grant a set of files; it grants a route for the user to hand files over one at a time, which is why its reachable set is bounded by construction rather than by a filter you wrote. The identical injection against a `drive.file` agent can instruct it to exfiltrate the document the user already handed it. Against the `drive.readonly` agent it can instruct a search of the whole corpus — [the over-scoped guide](/fail/over-scoped-oauth/) does the arithmetic, and lands at roughly 250,000 distinct documents across a 60-user pilot, 510× the corpus the agent was built to read per user. Same model, same prompt, different scope string, different incident. Narrowing is a re-consent rollout with cohorts and a force-revoke date, except on GitHub, which documents that "if you remove permissions or webhooks from your GitHub App, the changes will take effect immediately" — no user in the loop, and therefore no excuse for deferring it.
 
 **Put the second principal in the request.** The agent's effective permissions become the intersection of what the agent may do and what the caller may do — never the union, which is a privilege escalation path in both directions. In this incident the intersection would not have stopped the Drive reads, because the user could read those documents; it would have stopped the version of this incident where the agent's own broad grant answers a question the asker was never entitled to ask, and it is the control that makes the eventual audit record mean something. [Delegated identity](/govern/delegated-identity/) has the token exchange, the intersection rule, and the revocation handling; [least privilege](/govern/least-privilege/) has the resource-level half, and its blunt note applies directly here: a constraint enforced inside the agent's own process is a boundary against a *mistaken* agent, not a compromised one. The channel allowlist that produced the denial above only counts because it is evaluated outside the process the prompt reached.
 
@@ -274,7 +290,7 @@ Every control below buys exactly one of three things for a given class, and the 
 | Permissions | Granted-minus-exercised diff on a schedule; an alert on a new grant carrying a scope no code path uses | Policy evaluated per request outside the agent's process, refusing calls the token would permit | Narrow the grant, so the capability does not exist to be misused | Detection. You cannot argue for the narrowing until you can name the unexercised set, and the diff takes an afternoon |
 | Credentials | Exact-value scanning fed by the issuer; a canary; a boot check that every log handler is guarded | Revoke on suspicion; short lifetimes, so expiry bounds a leak nobody detects | The agent holds no provider credential — it names a connection and something else holds the secret | Containment. Cut the lifetime today; the refactor is worth more but takes longer |
 | Control flow | Per-run aggregates against a measured p99; cost per run; a metric naming which limit stopped each run | A run budget over calls, tokens, money, and wall clock; a circuit breaker; a kill switch with no deploy | A checkable success predicate in the planner, and a stable idempotency key on every write | Containment. The budget stops the bleeding regardless of which of the five loop shapes you have |
-| Trust boundary | A taint flag, then the standing query for successful writes taken with untrusted content in context | Narrow scope and permission intersection, so a successful injection reaches less | Nothing fully. There is no known fool-proof prevention for prompt injection | Containment, and be honest that it is containment. Spend nothing on detecting the injection itself |
+| Trust boundary | A taint flag, then the standing query for successful writes taken with untrusted content in context | Narrow scope and permission intersection, so a successful injection reaches less | Nothing fully. OWASP's position is that it is unclear whether fool-proof methods of prevention exist | Containment, and be honest that it is containment. Spend nothing on detecting the injection itself |
 | Attribution | Try the two-principal query cold and see whether it answers; monitor the denial count for zero | Nothing. Attribution is not a runtime control; it is what makes the other five investigable | One record per attempted action at the decision point, both principals, append-only | Prevention. This is the only row where the cheap option and the correct option are the same |
 | Lifecycle | Reconcile stored delegations against the directory; diff the tool registry against a declared list | Terminal handling of revoked-grant errors, so a missed deprovisioning stops the agent | An owner and an expiry per agent, enforced as a row a review can fail | Detection. Almost every estate has an orphan already, and finding it is a query |
 
@@ -300,14 +316,14 @@ Run this before an agent reaches production, against the pull request and the de
 - [ ] **Control flow** — a kill switch stops one agent for one user without a deploy, and it has been tested in production this quarter.
 - [ ] **Trust boundary** — the agent's exposure to untrusted content is written down explicitly, and its scope was reviewed against that fact specifically.
 - [ ] **Trust boundary** — destinations for anything that leaves are declared outside the agent's process, and URLs the model constructed are not auto-fetched.
-- [ ] **Trust boundary** — the standing report of successful writes taken with untrusted content in context exists and has a named reader.
+- [ ] **Trust boundary** — the standing report of successful non-read actions taken with untrusted content in context exists, has a named reader, and treats an unrecognised action verb as one to review rather than as a read.
 - [ ] **Attribution** — one record per *attempted* action, written at the policy decision point, so denials appear; verified by triggering a denial and finding the row.
 - [ ] **Attribution** — every record names the agent and the human, keyed on an immutable subject id, with a correlation id shared across the task.
 - [ ] **Attribution** — the audit store's writer role cannot update, delete, or truncate it, and this was tested by trying.
 - [ ] **Lifecycle** — the agent has a named human owner and an expiry date, both recorded somewhere a review can fail.
 - [ ] **Lifecycle** — offboarding deletes stored delegations, and a scheduled job reconciles them against the directory so an orphan cannot survive a missed webhook.
 - [ ] **Lifecycle** — revoked-grant errors are terminal in code rather than retried.
-- [ ] **Response** — the runbook says stop, revoke, scope, rotate, in those words, and names who can revoke each credential type out of hours.
+- [ ] **Response** — the runbook says stop, revoke, scope, rotate, in those words; states that the fixed part is revoke before rotate and that an integration which must keep serving rotates immediately after revoking; and names who can revoke each credential type out of hours.
 
 ## Failure modes
 
@@ -341,7 +357,7 @@ These are not the six classes again. They are the ways the *response* to them fa
 
 **Symptom:** the runaway, the injection, and the duplicate writes all happened while every graph looked normal, and the first signal was an invoice, a partner email, or a customer.
 
-**Cause:** every alert is on a rate, and none of these change a rate. Ten times the tool calls spread over ten times the duration is identical on a per-second graph, and a write committed six times is six successes.
+**Cause:** every alert is on a rate, and none of these change a rate — for the reason given under control-flow failures above, where ten times the calls over ten times the duration draws the same graph. A write committed six times is six successes.
 
 **Fix:** alert on per-run aggregates with thresholds traced to a recorded baseline, and add the two queries that are not thresholds at all: successful writes taken with untrusted content in context, and the denial count over time. Neither is a threshold because neither has a safe number — they are lists a person reads.
 
@@ -422,14 +438,14 @@ The [connect pillar](/connect/) is the other end of all of this: per-provider sc
 
 Primary sources for the external claims above:
 
-- [OWASP LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) — the definition of indirect prompt injection, and that no fool-proof method of prevention is known.
+- [OWASP LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) — the definition of indirect prompt injection, and that "it is unclear if there are fool-proof methods of prevention for prompt injection".
 - [OWASP LLM02:2025 Sensitive Information Disclosure](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/) — that system prompt restrictions may not be honoured and can be bypassed by prompt injection.
 - [OWASP LLM06:2025 Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) — excessive functionality, permissions, and autonomy as the root causes.
 - [The lethal trifecta for AI agents](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) — private data, untrusted content, and external communication as the combination that makes exfiltration easy.
 - [Google Drive API-specific authorization and authentication](https://developers.google.com/workspace/drive/api/guides/api-specific-auth) — the `drive.readonly` and `drive.file` scope strings, Google's description of each, and their classifications.
 - [Using OAuth 2.0 for web server applications](https://developers.google.com/identity/protocols/oauth2/web-server) — the `https://oauth2.googleapis.com/revoke` endpoint, which takes a token rather than a scope list.
 - [OAuth Token Audit Activity Events](https://developers.google.com/workspace/admin/reports/v1/appendix/activity/token) — the `activity` event and its `api_name` and `method_name` parameters.
-- [Google Workspace audit log data retention and lag times](https://knowledge.workspace.google.com/admin/reports/data-retention-and-lag-times) — six-month retention and the "up to a few hours" lag on OAuth log events.
+- [Google Workspace audit log data retention and lag times](https://knowledge.workspace.google.com/admin/reports/data-retention-and-lag-times) — six-month retention, and the token log events row, which gives the lag as "A couple of hours".
 - [Modifying a GitHub App registration](https://docs.github.com/en/apps/maintaining-github-apps/editing-a-github-apps-permissions) — that removed permissions take effect immediately, with no per-installation approval.
 - [W3C Trace Context](https://www.w3.org/TR/trace-context/) — the `traceparent` header and the 32-hex-digit trace-id reused as a correlation id.
-- [NIST SP 800-53 Rev. 5](https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final) — AU-3 on the required content of an audit record, and AU-9 on protecting audit information from the audited component.
+- [NIST SP 800-53 Rev. 5](https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final) — AU-3 on the required content of an audit record, and AU-9 on protecting audit information and restricting management of the logging function to a subset of privileged users.

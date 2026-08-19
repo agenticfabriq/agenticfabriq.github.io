@@ -17,6 +17,11 @@ whom, to what, and which of those actions were taken while untrusted content
 was in the model's context. What it cannot answer: anything that did not go
 through the audited path. A credential used directly against the provider
 leaves no row here, which is why the provider's own log is the second source.
+
+The action vocabulary is yours. `WRITE_ACTIONS` and `READ_ACTIONS` below are
+this file's defaults, and a verb in neither is reported as unclassified rather
+than assumed to be a read - see the third demo block. Edit both sets to match
+your own schema before you put a count from this file in a report.
 """
 
 from __future__ import annotations
@@ -46,7 +51,16 @@ REQUIRED_FIELDS = (
     "untrusted_input",
 )
 
+# Both vocabularies are declared, and neither is the complement of the other.
+# `examples/govern-audit/schema.sql` types `action` as free text with no
+# controlled vocabulary, so a store with its own verbs - `post`, `patch`,
+# `post_message`, `PUT` - is the expected case rather than the odd one. Edit
+# these two sets to match yours before you trust a count from this file.
 WRITE_ACTIONS = frozenset({"write", "create", "update", "delete", "send"})
+READ_ACTIONS = frozenset({"read", "list", "search", "get"})
+
+# Display cap only. The count printed above the list is never truncated.
+REVIEW_LIST_CAP = 20
 
 
 class IncidentInconclusive(Exception):
@@ -135,13 +149,29 @@ def scope(
     window = [r for r in records if in_window(r, agent_id, since, until)]
     check_soundness(window)
 
-    reads = [r for r in window if r["action"] not in WRITE_ACTIONS]
+    reads = [r for r in window if r["action"] in READ_ACTIONS]
     writes = [r for r in window if r["action"] in WRITE_ACTIONS]
+    # An action in neither vocabulary is not a read. Classifying it as one
+    # would drop it out of the review list below, which is the single output
+    # this tool exists to produce, and it would do so silently.
+    unclassified = [
+        r for r in window if r["action"] not in READ_ACTIONS and r["action"] not in WRITE_ACTIONS
+    ]
     denied = [r for r in window if r["decision"] == "deny"]
     tainted = [r for r in window if r["untrusted_input"]]
-    tainted_writes = [
-        r for r in writes if r["untrusted_input"] and r["decision"] == "allow" and r["outcome"] == "success"
-    ]
+
+    def _needs_review(record: dict[str, Any]) -> bool:
+        return (
+            record["untrusted_input"]
+            and record["decision"] == "allow"
+            and record["outcome"] == "success"
+        )
+
+    # Unclassified actions join the review list rather than being excluded from
+    # it: over-reporting sends a human to read a row that turns out to be a
+    # read, and under-reporting sends nobody to read a row that was a write.
+    tainted_writes = [r for r in writes if _needs_review(r)]
+    tainted_unclassified = [r for r in unclassified if _needs_review(r)]
     principals = sorted({r["principal_id"] or "(unattended)" for r in window})
 
     return {
@@ -154,9 +184,12 @@ def scope(
         "reads": len(reads),
         "read_resources": sorted({r["resource"] for r in reads}),
         "writes": len(writes),
+        "unclassified": len(unclassified),
+        "unclassified_actions": sorted({r["action"] for r in unclassified}),
         "denied": [(r["resource"], r.get("decision_reason", "")) for r in denied],
         "tainted": len(tainted),
         "tainted_writes": tainted_writes,
+        "tainted_unclassified": tainted_unclassified,
     }
 
 
@@ -171,20 +204,37 @@ def render(report: dict[str, Any]) -> str:
         f"  reads ..................... {report['reads']} over "
         f"{len(report['read_resources'])} distinct resources",
         f"  writes .................... {report['writes']}",
-        f"  denied .................... {len(report['denied'])}",
     ]
+    if report["unclassified"]:
+        lines.append(
+            f"  unclassified actions ...... {report['unclassified']}  "
+            f"(verbs: {', '.join(report['unclassified_actions'])})"
+        )
+        lines.append(
+            "    these are in neither WRITE_ACTIONS nor READ_ACTIONS. They are not "
+            "counted as reads,\n    and the tainted ones are listed for review below. "
+            "Add them to a vocabulary."
+        )
+    else:
+        lines.append(f"  unclassified actions ...... 0")
+    lines.append(f"  denied .................... {len(report['denied'])}")
     for resource, reason in report["denied"]:
         lines.append(f"    {resource}  {reason}")
     lines.append(f"  untrusted input in context. {report['tainted']} record(s)")
+    review = [(r, "write") for r in report["tainted_writes"]]
+    review += [(r, "unclassified") for r in report["tainted_unclassified"]]
     lines.append(
-        f"  writes taken with untrusted input in context: {len(report['tainted_writes'])}"
+        f"  actions taken with untrusted input in context, not reads: {len(review)}"
         "   <- review by hand"
     )
-    for record in report["tainted_writes"]:
+    for record, kind in review[:REVIEW_LIST_CAP]:
         lines.append(
             f"    {record['occurred_at']}  {record['resource']}  {record['action']}  "
-            f"for {record['principal_id'] or '(unattended)'}"
+            f"({kind})  for {record['principal_id'] or '(unattended)'}"
         )
+    if len(review) > REVIEW_LIST_CAP:
+        # Truncate the display, never the count on the line above it.
+        lines.append(f"    ... and {len(review) - REVIEW_LIST_CAP} more; export the full list")
     lines.append(
         "  bound: this covers calls that crossed the audited path. A credential "
         "used directly\n         against the provider leaves no row here, so the "
@@ -275,6 +325,15 @@ def answerable_fixture() -> list[dict[str, Any]]:
     return records
 
 
+def unclassified_fixture() -> list[dict[str, Any]]:
+    """The same incident from a store whose schema uses its own verbs."""
+    records = answerable_fixture()
+    # Only the write verb differs, which is the case that costs something: a
+    # write classified as a read leaves the review list silently short.
+    renamed = {"send": "post_message"}
+    return [{**r, "action": renamed.get(r["action"], r["action"])} for r in records]
+
+
 def inconclusive_fixture() -> list[dict[str, Any]]:
     records = answerable_fixture()
     stripped = dict(records[3])
@@ -290,6 +349,9 @@ def _demo() -> int:
     agent = "agent:meeting-brief@v3"
 
     print(render(scope(answerable_fixture(), agent_id=agent, since=since, until=until)))
+    print()
+    print("== the same window, from a store that uses its own action verbs ==")
+    print(render(scope(unclassified_fixture(), agent_id=agent, since=since, until=until)))
     print()
     print("== the same window, from a log that cannot support an answer ==")
     try:
