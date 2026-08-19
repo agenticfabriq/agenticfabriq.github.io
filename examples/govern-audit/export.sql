@@ -34,7 +34,7 @@
 -- encode, enums cast to text -- so the verifier compares like with like rather
 -- than skipping the awkward types. A partial cross-check invites exactly the
 -- claim this guide warns against: saying a control covers what an investigator
--- reads when it covers nine columns of twenty-six.
+-- reads when it covers nine columns of the table's twenty-seven.
 --
 -- One column is necessarily absent: recorded_at. The emitter never sees it, so
 -- it is not in canonical_form and cannot be cross-checked against it. That is

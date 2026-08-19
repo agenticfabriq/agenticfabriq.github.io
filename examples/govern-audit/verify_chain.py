@@ -23,11 +23,13 @@ Four checks per record:
   * prev_hash equals the previous record's record_hash -- nothing was removed
     from the middle or reordered;
   * chain_seq increments by one -- the same, stated independently of any clock;
-  * every queryable column still agrees with canonical_form -- so editing a
-    column an investigator reads, while leaving the hashed bytes alone, is
-    caught. export.sql re-renders each column into the emitter's spelling, so
-    this covers occurred_at and the bytea and jsonb columns too, not only the
-    ones that happen to be plain text.
+  * every column the exporter ships still agrees with canonical_form -- so
+    editing a column an investigator reads, while leaving the hashed bytes
+    alone, is caught. export.sql re-renders each column into the emitter's
+    spelling, so this covers occurred_at and the bytea and jsonb columns too,
+    not only the ones that happen to be plain text. Coverage is exactly what
+    export.sql selects: a column added to the table but not to that file is not
+    checked here, and nothing in this script can tell.
 
 Read the limits before you rely on this. It does NOT detect:
 
@@ -68,6 +70,9 @@ from typing import Any, Iterator
 # canonical_form and there is nothing to compare it against. It is protected by
 # the writer holding no INSERT privilege on it, not by this file.
 NOT_IN_CANONICAL_FORM = frozenset({"recorded_at"})
+
+# Keys that are envelope, not record content, and so are never cross-checked.
+RESERVED_KEYS = frozenset({"canonical_form", "record_hash", "columns", "__malformed__"})
 
 
 def read_lines(path: str) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -136,13 +141,26 @@ def verify(path: str) -> list[str]:
                 f"sequence in chain {chain_id!r}, expected {expected_seq}"
             )
 
-        # Cross-check EVERY queryable column against the hashed bytes. Iterating
+        # Cross-check EVERY exported column against the hashed bytes. Iterating
         # the exporter's own output rather than a hand-maintained field list is
         # what keeps this honest: a column added to the store and to export.sql
         # is checked from that moment, with no second edit to remember.
-        columns = line.get("columns", line)
+        #
+        # `columns` is how export.sql ships them; emit_record.py's stdout carries
+        # the same fields at the top level instead. Fall back to that, but never
+        # fall back to *nothing*: an export that lost its columns must fail
+        # rather than sail through a check that had no work to do and still
+        # printed a clean bill of health.
+        columns = line.get("columns")
+        if columns is None:
+            columns = {k: v for k, v in line.items() if k not in RESERVED_KEYS}
+        if not columns:
+            problems.append(
+                f"{record_id}: no columns to cross-check -- this record carries a "
+                "hash and nothing to compare against it. Re-export with export.sql."
+            )
         for field, value in sorted(columns.items()):
-            if field in NOT_IN_CANONICAL_FORM or field in ("canonical_form", "record_hash"):
+            if field in NOT_IN_CANONICAL_FORM or field in RESERVED_KEYS:
                 continue
             if field not in body:
                 problems.append(
