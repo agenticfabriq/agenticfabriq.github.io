@@ -408,6 +408,8 @@ CREATE INDEX agent_action_denials
 
 Run it with the auditor privileges and never the writer's — as a named human who is a member of the `auditor` role, adopting it with `SET ROLE auditor`. The role itself is `NOLOGIN` in `roles.sql` on purpose: reads of an audit store are themselves audit events, and you cannot log who read what if everyone shares one login.
 
+Run it with `-v ON_ERROR_STOP=1`, and treat that flag as part of the control rather than as psql hygiene. Without it a failed `SET ROLE` is advisory: a caller who is not a member of `auditor` gets `ERROR: permission denied to set role "auditor"` on stderr, psql runs every remaining statement under that caller's own privileges, and the process still exits 0. The same applies to `export.sql`. A scheduled export or a nightly verification job sees a zero exit status and a full result set, and reports that it read as the restricted role when it did not. This is the same failure as a `DEFAULT` presented as enforcement or a guard whose condition can never be false — the control reports success while doing nothing — and it is worth checking for wherever a documented command carries a restriction in a statement rather than in a privilege.
+
 ```sql
 SELECT occurred_at, correlation_id, resource, action,
        decision, outcome, decision_reason, grant_id, untrusted_input,
@@ -490,6 +492,7 @@ The honest summary: the first column is not a real option, and the choice betwee
 - [ ] **Every** `SECURITY DEFINER` function has `EXECUTE` revoked from `PUBLIC` — all of them, including trigger functions that are not usefully callable today; verified with `SELECT proname, proacl FROM pg_proc`, since PostgreSQL grants it to `PUBLIC` on creation and a later `GRANT` to your writer changes nothing.
 - [ ] Each guard in a definer function has been tested by an operation that should trip it, run as the identity that should be refused — not merely read. A guard written with `SELECT ... INTO found` instead of plpgsql's built-in `FOUND` is dead code that looks correct.
 - [ ] You know what happens to the audit path when the writer's login credential rotates, and it is not "writes stop silently".
+- [ ] Every documented `psql` invocation that adopts `SET ROLE auditor` passes `-v ON_ERROR_STOP=1` — confirmed by running it as a non-member and watching it exit non-zero, since without the flag the failed `SET ROLE` is a stderr line, the query runs under the caller's own privileges, and psql exits 0.
 - [ ] The chain is verified against an export from the **store**, not only against the emitter's stdout — those are different code paths and only one of them is what you will have during an incident.
 - [ ] Writers on a single chain are serialised, or each emitter owns a chain and each chain's head is anchored separately.
 - [ ] The hash chain is verified on a schedule, and the head hash is anchored somewhere the store's operator does not control.
@@ -604,7 +607,13 @@ async def main() -> None:
                 "to": "2026-08-19T00:00:00Z",
             },
         )
-        records = result.get("records", [])
+        # Not result.get("records", []). If that literal is wrong for your
+        # deployment, a default of [] prints "0 actions" -- the same sentence a
+        # clean window prints.
+        if "records" not in result:
+            raise SystemExit(f"no 'records' key (keys: {sorted(result)})")
+
+        records = result["records"]
         denied = [r for r in records if r.get("decision") == "deny"]
         print(f"{len(records)} actions, {len(denied)} denied")
 
@@ -612,7 +621,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The runnable version is `examples/govern-audit/fabriq_investigation.py`. Connection names, method names, and response shapes are per deployment, so run `afctl tools list` against your own gateway rather than trusting `audit_store`, `query_actions`, or the `records` key on faith.
+The runnable version is `examples/govern-audit/fabriq_investigation.py`. Connection names, method names, and response shapes are per deployment, so run `afctl tools list` against your own gateway rather than trusting `audit_store`, `query_actions`, or the `records` key on faith. Note what the code does when that key is wrong, because it is the whole lesson of this guide applied to four characters of Python: `result.get("records", [])` turns a wrong literal into `0 actions, 0 denied`, which is exactly what a clean window prints. An investigation that looked in the wrong place must not be able to render as an agent that did nothing.
 
 Be clear-eyed about what a control layer does and does not settle. It settles emitter completeness, which is the failure that actually happens. It does not settle retention, redaction rules, or what your compliance documentation is allowed to claim — those are yours either way, and everything in steps 3, 5, and 9 applies unchanged. What you are trading is a maintenance burden for a dependency in the path of every call, and that dependency's own retention and export model becomes a question you have to ask before you adopt it, not after. If you would rather own the emitters, [Agentic Fabriq](https://agenticfabriq.com) is not required for any of this — the schema, the store, and the queries above are the whole thing, and they are yours.
 

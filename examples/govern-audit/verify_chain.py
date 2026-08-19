@@ -3,7 +3,7 @@
     python3 emit_record.py > records.jsonl        # straight from the emitter
     python3 verify_chain.py records.jsonl
 
-    psql -t -A -v chain="'chain:emitter-1'" \
+    psql -t -A -v ON_ERROR_STOP=1 -v chain="'chain:emitter-1'" \
          -f export.sql > records.jsonl            # or out of the store
     python3 verify_chain.py records.jsonl
 

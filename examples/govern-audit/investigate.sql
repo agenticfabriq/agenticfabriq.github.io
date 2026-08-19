@@ -1,7 +1,7 @@
 -- The investigation. Executed against PostgreSQL 17 with schema.sql loaded.
 --
 -- Run with the read-only auditor privileges, as a named human:
---   psql -U alice -d auditdb \
+--   psql -U alice -d auditdb -v ON_ERROR_STOP=1 \
 --     -v agent="'agent:billing-triage@v7'" \
 --     -v principal="'user:ada@example.com'" \
 --     -v from="'2026-08-18T00:00:00Z'" \
@@ -15,6 +15,13 @@
 -- connection stays attributable to a person while the privileges live in one
 -- place. Reads of an audit store are themselves audit events; you cannot log
 -- who read what if everyone shares one login.
+--
+-- ON_ERROR_STOP=1 is what makes that SET ROLE binding rather than advisory.
+-- Without it, a caller who is not a member of auditor gets
+--   ERROR:  permission denied to set role "auditor"
+-- on stderr and then runs every query below under their own privileges, and
+-- psql still exits 0. The restriction you documented did not apply and nothing
+-- told you.
 --
 -- Query 1 is the one that gets run at 2am. Queries 2 and 3 are what you run
 -- next, and they are here because an audit trail nobody can query is a backup.

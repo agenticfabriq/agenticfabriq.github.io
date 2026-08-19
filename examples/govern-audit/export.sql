@@ -1,11 +1,20 @@
 -- Export a chain for verification. Executed against PostgreSQL 17.
 --
---   psql -U alice -d auditdb -q -t -A \
+--   psql -U alice -d auditdb -q -t -A -v ON_ERROR_STOP=1 \
 --     -v chain="'chain:emitter-1'" -f export.sql > records.jsonl
 --   python3 verify_chain.py records.jsonl
 --
 -- -q -t -A all three matter: quiet, tuples only, unaligned. Without them psql
 -- emits command tags, column headers, and padding, and the output is not JSONL.
+--
+-- ON_ERROR_STOP=1 matters at least as much, for a reason that is easy to miss.
+-- Without it the `SET ROLE auditor` below is advisory rather than binding. Run
+-- this as someone who is not a member of auditor and psql prints
+--   ERROR:  permission denied to set role "auditor"
+-- to stderr, carries on, exports the whole chain under the caller's OWN
+-- privileges, and exits 0. You believe you read as the restricted role and you
+-- did not, and a scheduled export sees nothing but a zero exit status. A
+-- control whose failure is invisible to the thing running it is not a control.
 --
 -- Connect as a real login user who is a MEMBER of auditor, then adopt the role.
 -- `auditor` is NOLOGIN in roles.sql on purpose -- it is a privilege set, not a

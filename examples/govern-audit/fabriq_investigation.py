@@ -53,7 +53,21 @@ async def main() -> None:
             },
         )
 
-        records = result.get("records", [])
+        # NOT result.get("records", []). The docstring above says `records` is a
+        # placeholder for whatever your deployment returns, and defaulting to an
+        # empty list turns getting that literal wrong into the sentence "0
+        # actions, 0 denied" -- which is indistinguishable from an agent that did
+        # nothing, and is the one wrong answer an investigation must never give.
+        # A lookup that finds nothing because it looked in the wrong place has
+        # to say so.
+        if "records" not in result:
+            raise SystemExit(
+                f"response carries no 'records' key (keys: {sorted(result)}). "
+                "Run `afctl tools list` and use the key your deployment actually "
+                "returns -- do not read this as an empty result."
+            )
+
+        records = result["records"]
         for record in records:
             print(
                 record.get("occurred_at"),
