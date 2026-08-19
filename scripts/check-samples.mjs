@@ -80,12 +80,56 @@ const EXTERNAL_PACKAGES = [
   'requests',
 ];
 
+// The allowlist above is enforced twice, because each half misses what the
+// other catches. The import probe below only sees a package it cannot find, so
+// on a machine where an unlisted package happens to be installed — a CI runner
+// that installed the allowlist and got the whole transitive closure of crewai
+// and langchain with it — an unlisted import would resolve and pass silently.
+// So read every `import` in every sample statically as well, at any depth, and
+// fail on a root that is neither stdlib, nor a sibling module in the same
+// example directory, nor on the list. This one does not depend on what is
+// installed.
+const ALLOWLIST_PROBE = `
+import ast, json, os, sys
+
+external = set(json.loads(sys.argv[1]))
+findings = []
+
+for path in json.loads(sys.argv[2]):
+    directory = os.path.dirname(path)
+    siblings = {name[:-3] for name in os.listdir(directory) if name.endswith('.py')}
+    tree = ast.parse(open(path, encoding='utf-8').read(), filename=path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots = [alias.name.split('.')[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue  # relative import, resolved inside the example directory
+            roots = [(node.module or '').split('.')[0]]
+        else:
+            continue
+        for root in roots:
+            if not root or root in sys.stdlib_module_names or root in siblings or root in external:
+                continue
+            findings.append({'path': path, 'root': root, 'line': node.lineno})
+
+print(json.dumps(findings))
+`;
+
 const IMPORT_SKIP = new Map([
   [
     'examples/connect-slack/verify_signature.py',
     'reads os.environ["SLACK_SIGNING_SECRET"] at module scope, so importing it ' +
       'demands a real signing secret. Nothing imports it — it is a standalone ' +
       'runnable server — so skipping it costs no coupling coverage.',
+  ],
+  [
+    'examples/connect-slack/slack_agent.py',
+    'reads os.environ["SLACK_BOT_TOKEN"] at module scope, so importing it ' +
+      'demands a real bot token. Nothing imports it — it is a standalone ' +
+      'runnable script — so skipping it costs no coupling coverage. It was ' +
+      'invisible until CI started installing `requests`, because the missing ' +
+      'package short-circuited the import before the module body ran.',
   ],
 ]);
 
@@ -125,6 +169,24 @@ except AttributeError as error:
     emit(status='fail', detail='AttributeError: %s' % error)
 emit(status='ok', detail='')
 `;
+
+try {
+  const raw = execFileSync(
+    'python3',
+    ['-c', ALLOWLIST_PROBE, JSON.stringify(EXTERNAL_PACKAGES), JSON.stringify(files)],
+    { stdio: 'pipe', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } },
+  ).toString();
+  for (const finding of JSON.parse(raw.trim().split('\n').pop())) {
+    failures.push(
+      `${finding.path}:${finding.line}: imports '${finding.root}', which is neither stdlib, ` +
+        'a sibling module, nor on the EXTERNAL_PACKAGES allowlist. Add it there, in review, on purpose.',
+    );
+  }
+} catch (error) {
+  failures.push(
+    `allowlist scan failed:\n${error.stdout?.toString() ?? ''}${error.stderr?.toString() ?? ''}`,
+  );
+}
 
 const importSkipped = [];
 let importChecked = 0;
