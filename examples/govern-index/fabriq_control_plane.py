@@ -1,4 +1,4 @@
-"""Ask the control layer the four questions the matrix is made of.
+"""Ask the control layer the three questions the matrix axes are made of.
 
     pip install agentic-fabriq-sdk
     export AF_TOKEN=...
