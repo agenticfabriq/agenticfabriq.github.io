@@ -6,6 +6,16 @@ import { canonical, organizationJsonLd, breadcrumbJsonLd } from '../lib/seo';
 
 const guides = await getCollection('guides');
 const byPillar = (slug: string) => guides.filter((g) => g.data.pillar === slug && !g.data.cornerstone);
+const cornerstone = (slug: string) => guides.find((g) => g.data.pillar === slug && g.data.cornerstone);
+
+const PILLAR_INTRO: Record<string, string> = {
+  connect:
+    'Connect answers the question you have before the grant exists: which permission does this agent actually need against this provider, how does it get one, and what does the provider hand over that you did not ask for. One guide per system, each with the real scope names and the consent flow as it actually behaves.',
+  govern:
+    'Govern is the same material one level up, where the answer stops being per-provider. An agent needs an identity that is neither a person nor a service account, permissions decided per call rather than per grant, credentials it never holds, and a record naming both principals. These are the decisions you make once and apply everywhere.',
+  fail:
+    'Fail reads the same subject backwards, from the incident. Each guide starts with a symptom you can observe — a token in a trace, a rate limit you did not know you shared, a grant nobody can justify — and works back to the cause and the containment. Read these when something is already live.',
+};
 ---
 <BaseLayout
   title="Agent Integration Playbook"
@@ -15,19 +25,115 @@ const byPillar = (slug: string) => guides.filter((g) => g.data.pillar === slug &
   jsonLd={[organizationJsonLd(), breadcrumbJsonLd([{ name: 'Playbook', url: canonical('/') }])]}
 >
   <h1>Agent Integration Playbook</h1>
+
   <p>
-    Practical, vendor-neutral guides on giving AI agents access to real systems without
-    leaking credentials or handing over more than they need.
+    A free, vendor-neutral reference on giving AI agents access to real systems — mailboxes,
+    repositories, wikis, databases, and third-party tool servers — without handing over more
+    than the job needs. {guides.length} guides, no gate, no signup.
   </p>
-  {PILLARS.map((pillar) => (
-    <section>
-      <h2><a href={`/${pillar.slug}/`}>{pillar.title}</a></h2>
-      <p>{pillar.blurb}</p>
-      <ul>
-        {byPillar(pillar.slug).map((guide) => (
-          <li><a href={`/${guide.id}/`}>{guide.data.title}</a></li>
-        ))}
-      </ul>
-    </section>
-  ))}
+
+  <p>
+    It is written for engineers shipping agents into production at companies that have to
+    answer who did what, on whose behalf, and with what permission. If you are prototyping
+    against your own API key on your own laptop, most of this is premature. If a real user is
+    about to click Allow on a consent screen, or an agent is about to hold a credential that
+    outlives the request, it is not.
+  </p>
+
+  <p>
+    Every guide is one path, start to finish: what breaks without the control, runnable code,
+    a decision table of the options genuinely on the table, a checklist you can paste into a
+    pull request, and the failure modes with the symptom first. External claims link the
+    vendor's own page, an RFC, or a standards document rather than a secondary source that
+    restates them, because scope strings and error codes go stale and blog posts do not get
+    corrected. Where something could not be confirmed against a primary source, the guide
+    says so in place instead of guessing.
+  </p>
+
+  <h2>The three pillars</h2>
+
+  <p>
+    The library splits three ways, and the split is by when you need the answer rather than by
+    topic. <a href="/connect/">Connect</a> is before the grant exists. <a href="/govern/">Govern</a>
+    is the policy layer that stops you re-deciding the same thing per provider.
+    <a href="/fail/">Fail</a> is after it is live and something is wrong.
+  </p>
+
+  <p>
+    The same subject appears in all three and means something different each time. Scope
+    selection is a per-provider table in Connect, a repeatable method in Govern, and a
+    diagnostic you run against an existing grant in Fail. Credentials are an OAuth lifecycle in
+    Connect, a vaulting and rotation problem in Govern, and a leak path in Fail. Pick the
+    pillar that matches where you are standing, not the one whose name matches the noun.
+  </p>
+
+  <h2>Where to start</h2>
+
+  <p>
+    Each pillar has a cornerstone guide that carries the whole argument. Those three are the
+    pages worth reading whole; the topic guides underneath them are reference material, so read
+    the one you need and skip the rest.
+  </p>
+
+  <ul>
+    <li>
+      <strong>Nothing granted yet.</strong> Start with
+      <a href="/connect/">How to Give an AI Agent Access to Your Tools</a> for the four ways an
+      agent gets access and what each costs, then read the guide for your provider.
+    </li>
+    <li>
+      <strong>Several integrations, same decisions repeating.</strong> Start with
+      <a href="/govern/">Agent Identity and Permissions</a>. If you are choosing scopes provider
+      by provider and re-arguing the same points, the decision has moved up a level.
+    </li>
+    <li>
+      <strong>Something is already live.</strong> Start with
+      <a href="/fail/">How Agent Integrations Fail in Production</a>, which sorts the failures by
+      class and tells you which one you are looking at from the symptom.
+    </li>
+  </ul>
+
+  {PILLARS.map((pillar) => {
+    const anchor = cornerstone(pillar.slug);
+    return (
+      <section>
+        <h2><a href={`/${pillar.slug}/`}>{pillar.title}</a></h2>
+        <p>{PILLAR_INTRO[pillar.slug]}</p>
+        <ul>
+          {anchor && (
+            <li>
+              <a href={`/${pillar.slug}/`}><strong>{anchor.data.title}</strong></a>
+              {' (cornerstone) — '}{anchor.data.description}
+            </li>
+          )}
+          {byPillar(pillar.slug).map((guide) => (
+            <li>
+              <a href={`/${guide.id}/`}>{guide.data.title}</a>
+              {' — '}{guide.data.description}
+            </li>
+          ))}
+        </ul>
+      </section>
+    );
+  })}
+
+  <h2>The code</h2>
+
+  <p>
+    Every non-trivial code path in the library has a runnable file behind it, kept in the
+    repository under <code>examples/</code> and referenced from the guide by path. The
+    examples are checked on every commit: they compile, their imports resolve, and anything
+    touching the Agentic Fabriq SDK is validated against the published surface, so a sample
+    cannot drift into calling something that does not exist. Prose is CC BY 4.0 and code is
+    Apache-2.0, so you can lift either.
+  </p>
+
+  <p>
+    Corrections are the most useful contribution. If a scope name changed, a quota moved, or a
+    guide states more than its cited page states, open an issue or a pull request on
+    <a href="https://github.com/agenticfabriq/agenticfabriq.github.io">the repository</a>. The
+    library is maintained by <a href="https://agenticfabriq.com">Agentic Fabriq</a>, which
+    builds a control layer for agent identity, permissions, and audit — every guide teaches the
+    do-it-yourself path first and in full, and says what it costs.
+  </p>
 </BaseLayout>
