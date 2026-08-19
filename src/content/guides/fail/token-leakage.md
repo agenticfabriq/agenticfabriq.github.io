@@ -1,15 +1,13 @@
 ---
-title: Token Leakage Through Agent Context
-description: How a credential in an agent context window escapes into traces, logs, model output, and injected requests, and how a broker closes the whole class of leak.
+title: "How AI Agents Leak API Keys, and How to Stop It"
+description: "How an API key in an agent's context escapes into traces, logs, model output and injected requests, and how a credential broker closes the whole class."
 pillar: fail
 updated: "2026-08-18"
 keywords:
-  - agent token leakage
-  - llm secret exposure
-  - prompt injection exfiltration
-  - system prompt leakage
-  - agent credential broker
-  - presigned url leak
+  - "keep api keys out of the agent context"
+  - "credential broker for ai agents"
+  - "prompts and secrets in observability traces"
+  - "is a presigned url a credential"
 relatedGuides:
   - govern/credentials
   - govern/audit

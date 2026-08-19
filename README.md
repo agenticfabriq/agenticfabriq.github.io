@@ -82,18 +82,18 @@ everywhere, rather than re-arguing them per provider.
 What breaks in production, read backwards from the symptom: how to see it coming, how to
 tell which failure you are looking at, and what contains it.
 
-- [How Agent Integrations Fail in Production](https://agenticfabriq.github.io/fail/)
-  (cornerstone) — The six classes of agent failure: permissions, credentials, control
-  flow, trust boundaries, attribution, lifecycle. The symptom, the detection, the fix.
-- [Over-Scoped OAuth](https://agenticfabriq.github.io/fail/over-scoped-oauth/) —
-  An over-scoped agent throws no errors. How the broad scope got granted, why nobody ever
-  narrows it, what it reaches, and a scope audit you can run this week.
-- [Token Leakage Through Agent Context](https://agenticfabriq.github.io/fail/token-leakage/)
-  — How a credential in an agent context window escapes into traces, logs, model output,
-  and injected requests, and how a broker closes the whole class of leak.
-- [Runaway Loops and Rate-Limit Blowups](https://agenticfabriq.github.io/fail/runaway-loops/)
-  — How agent loops run away, why retries multiply across layers, and the run budgets,
-  jittered backoff, circuit breakers, and idempotency keys that stop them.
+- [How Agent Integrations Fail: Six Modes and a Runbook](https://agenticfabriq.github.io/fail/) (cornerstone)
+  — The six ways agent integrations fail, why none of them page you, and the incident order
+  that works: stop the agent, revoke, scope the reach, then rotate.
+- [Over-Scoped OAuth: Audit and Narrow Agent Scopes](https://agenticfabriq.github.io/fail/over-scoped-oauth/)
+  — An over-scoped agent throws no errors. Diff the scopes you granted against the ones it
+  actually called, then narrow the grant without stranding users.
+- [How AI Agents Leak API Keys, and How to Stop It](https://agenticfabriq.github.io/fail/token-leakage/)
+  — How an API key in an agent's context escapes into traces, logs, model output and
+  injected requests, and how a credential broker closes the whole class.
+- [Runaway Agent Loops, Rate Limits, and Run Budgets](https://agenticfabriq.github.io/fail/runaway-loops/)
+  — Why agent loops run away, how retries multiply across layers, and the run budgets,
+  jittered backoff, breakers and idempotency keys that actually stop it.
 
 ## Runnable examples
 

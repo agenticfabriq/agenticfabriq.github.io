@@ -1,16 +1,15 @@
 ---
-title: How Agent Integrations Fail in Production
-description: "The six classes of agent failure: permissions, credentials, control flow, trust boundaries, attribution, lifecycle. The symptom, the detection, the fix."
+title: "How Agent Integrations Fail: Six Modes and a Runbook"
+description: "The six ways agent integrations fail, why none of them page you, and the incident order that works: stop the agent, revoke, scope the reach, then rotate."
 pillar: fail
 updated: "2026-08-18"
 cornerstone: true
 keywords:
-  - ai agent failures
-  - agent production incidents
-  - agent security failure modes
-  - agent incident response
-  - prompt injection privileged tool
-  - agent blast radius
+  - "ai agent incident response"
+  - "revoke or rotate first leaked token"
+  - "why over-permissioned agents don't show up in monitoring"
+  - "agent kill switch"
+  - "ai agent failures"
 relatedGuides:
   - fail/over-scoped-oauth
   - fail/token-leakage

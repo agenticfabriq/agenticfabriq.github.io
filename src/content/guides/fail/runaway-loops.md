@@ -1,16 +1,14 @@
 ---
-title: Runaway Loops and Rate-Limit Blowups
-description: How agent loops run away, why retries multiply across layers, and the run budgets, jittered backoff, circuit breakers, and idempotency keys that stop them.
+title: "Runaway Agent Loops, Rate Limits, and Run Budgets"
+description: "Why agent loops run away, how retries multiply across layers, and the run budgets, jittered backoff, breakers and idempotency keys that actually stop it."
 pillar: fail
 updated: "2026-08-18"
 keywords:
-  - agent runaway loop
-  - agent rate limit
-  - agent cost blowup
-  - exponential backoff full jitter
-  - circuit breaker agent
-  - idempotency key retry
-  - agent run budget
+  - "stop an ai agent running up api costs"
+  - "agent run budget"
+  - "why does my agent keep hitting rate limits"
+  - "agent stuck in a loop calling the same tool"
+  - "idempotency key on agent writes"
 relatedGuides:
   - connect/frameworks
   - connect/databases

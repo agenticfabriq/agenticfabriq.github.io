@@ -1,15 +1,13 @@
 ---
-title: Over-Scoped OAuth
-description: An over-scoped agent throws no errors. How the broad scope got granted, why nobody ever narrows it, what it reaches, and a scope audit you can run this week.
+title: "Over-Scoped OAuth: Audit and Narrow Agent Scopes"
+description: "An over-scoped agent throws no errors. Diff the scopes you granted against the ones it actually called, then narrow the grant without stranding users."
 pillar: fail
 updated: "2026-08-18"
 keywords:
-  - over-scoped oauth agent
-  - oauth scope blast radius
-  - agent permission audit
-  - unused oauth scopes
-  - oauth re-consent rollout
-  - scope drift detection
+  - "audit which oauth scopes an app actually uses"
+  - "remove scopes from an existing oauth token"
+  - "narrow oauth scopes without breaking existing users"
+  - "drive.readonly too broad"
 relatedGuides:
   - govern/least-privilege
   - govern/oauth-flows
