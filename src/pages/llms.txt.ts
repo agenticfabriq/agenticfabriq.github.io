@@ -11,6 +11,7 @@ export async function GET() {
     '> Open reference on connecting AI agents to real systems: tool integrations, OAuth and identity, least-privilege scopes, audit trails, and production failure modes. Prose is CC BY 4.0.',
     '',
     `- [Agent Integration Playbook](${homeUrl}): An open reference for connecting AI agents to real systems: tool integrations, OAuth and identity, least privilege, audit trails, and production failure modes.`,
+    `- [About the Agent Integration Playbook](${canonical('/about/')}): Who publishes the library, the editorial standard every guide is held to, what the build refuses to ship, how to report an error, and what goes stale first.`,
     '',
   ];
 

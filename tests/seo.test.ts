@@ -209,3 +209,62 @@ describe('article structured data', () => {
   });
 });
 
+describe('the about page', () => {
+  const about = () => {
+    const page = pages.find((p) => p.file === 'dist/about/index.html');
+    if (!page) throw new Error('dist/about/index.html was not built');
+    return page;
+  };
+
+  it('is built', () => {
+    expect(about().file).toBe('dist/about/index.html');
+  });
+
+  it('emits an AboutPage block naming the publisher', () => {
+    const { $ } = about();
+    const page = blocks($).find((b) => b['@type'] === 'AboutPage');
+    expect(page).toBeTruthy();
+    expect(page!.about['@id']).toBe('https://agenticfabriq.com/#organization');
+    expect(page!.dateModified).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('defines the organisation it references, on the page itself', () => {
+    const { $ } = about();
+    const org = blocks($).find((b) => b['@type'] === 'Organization');
+    expect(org).toBeTruthy();
+    expect(org!['@id']).toBe('https://agenticfabriq.com/#organization');
+  });
+
+  it('links out to at least three distinct internal destinations', () => {
+    const { $ } = about();
+    const targets = new Set(
+      $('main a[href]')
+        .map((_, element) => $(element).attr('href') ?? '')
+        .get()
+        .filter((href) => href.startsWith('/') && href !== '/' && href !== '/about/')
+    );
+    expect(targets.size).toBeGreaterThanOrEqual(3);
+  });
+
+  it('links to the repository and to the issue tracker', () => {
+    const { $ } = about();
+    const hrefs = $('main a[href]').map((_, element) => $(element).attr('href') ?? '').get();
+    expect(hrefs.some((href) => href.startsWith('https://github.com/agenticfabriq/agenticfabriq.github.io'))).toBe(true);
+    expect(hrefs).toContain('https://github.com/agenticfabriq/agenticfabriq.github.io/issues');
+  });
+
+  it('says what goes stale and how corrections are made', () => {
+    const text = about().$('main').text();
+    expect(text).toContain('What goes stale first');
+    expect(text).toContain('Reporting an error');
+    expect(text).toContain('Licensing');
+  });
+});
+
+describe('site chrome', () => {
+  it('links the about page from every page, so it is never an orphan', () => {
+    for (const { file, $ } of pages) {
+      expect($('a[href="/about/"]').length, file).toBeGreaterThan(0);
+    }
+  });
+});

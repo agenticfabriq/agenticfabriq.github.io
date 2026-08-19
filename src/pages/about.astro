@@ -1,0 +1,238 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Breadcrumbs from '../components/Breadcrumbs.astro';
+import {
+  canonical,
+  aboutPageJsonLd,
+  organizationJsonLd,
+  breadcrumbJsonLd,
+  ISSUES_URL,
+  REPO_URL,
+} from '../lib/seo';
+
+const guides = await getCollection('guides');
+const path = '/about/';
+const url = canonical(path);
+const updated = '2026-08-19';
+
+const title = 'About the Agent Integration Playbook';
+const description =
+  'Who publishes the Agent Integration Playbook, the editorial standard every guide is held to, what the build refuses to ship, and how to report an error.';
+
+const trail = [
+  { name: 'Playbook', url: canonical('/') },
+  { name: 'About', url },
+];
+
+const contributing = `${REPO_URL}/blob/main/CONTRIBUTING.md`;
+---
+<BaseLayout
+  title={title}
+  description={description}
+  path={path}
+  ogType="website"
+  jsonLd={[
+    aboutPageJsonLd({ title, description, url, updated }),
+    organizationJsonLd(),
+    breadcrumbJsonLd(trail),
+  ]}
+>
+  <Breadcrumbs trail={trail} />
+  <h1>About the Agent Integration Playbook</h1>
+  <p style="color:var(--ink-soft);font-size:.9rem;">Updated {updated}</p>
+
+  <p>
+    The Agent Integration Playbook is a free reference on giving AI agents access to real
+    systems — mailboxes, chat workspaces, repositories, document stores, databases, and tool
+    servers — without handing over more than the job needs. {guides.length} guides, split across
+    <a href="/connect/">Connect</a>, <a href="/govern/">Govern</a>, and
+    <a href="/fail/">Fail</a>. No gate, no signup, no email capture.
+  </p>
+
+  <p>
+    This page exists because the library asks you to act on specific strings. A guide tells you
+    which OAuth scope to request, which error means a token was revoked, and which quota you are
+    about to exhaust. A wrong literal costs you an incident, so you are owed the answer to who
+    writes this, what the writing is held to, what a machine checks before it ships, and what to
+    do when you find something wrong.
+  </p>
+
+  <h2>The standard every guide is held to</h2>
+
+  <p>Four rules. Every guide clears all four before it merges.</p>
+
+  <p>
+    <strong>A second reviewer fact-checks it against primary sources.</strong> Not a proofread.
+    The reviewer opens the cited page and reads the sentence being cited, because the common
+    failure is a draft that widens its own source. One did exactly that here: the vendor's page
+    said an exemption applied to <em>brand</em> verification, and the draft said it applied to
+    verification. Both sentences read fine. Only one of them is true. A claim in a guide may not
+    be broader than the page it cites.
+  </p>
+
+  <p>
+    <strong>Literals are verified, not recalled.</strong> Scope strings, endpoint paths, header
+    names, error codes, and quota numbers are read off the vendor's current documentation while
+    the guide is being written. Recalling a scope name that appears in a hundred blog posts is
+    how a guide inherits a value the vendor changed two years ago, and secondary sources do not
+    get corrected when it happens. Anything numeric comes from the vendor's own quota or limits
+    page.
+  </p>
+
+  <p>
+    <strong>Published code is executed, not just compiled.</strong> Compiling proves syntax.
+    Running proves behaviour, and running the pieces composed in the order they are published
+    proves something neither of the other two do. A sample here once passed review with an
+    error-sanitising wrapper and a retry layer that had each been verified alone; composed as
+    published, the retry sat inside and returned before the sanitiser ever saw the exception, so
+    the secret it was written to hide went straight to the model. A control is tested in the
+    position it ships in, against a payload where the thing that should not escape is
+    unmistakable if it does.
+  </p>
+
+  <p>
+    <strong>What could not be sourced is disclaimed in place.</strong> When a response shape or
+    an error code is real behaviour that no vendor page documents, the guide says so in the
+    sentence that uses it and branches its example on something that is documented. The claim is
+    not quietly dropped, and it is not softened into a sentence that sounds sourced. You get to
+    see the seam.
+  </p>
+
+  <h2>What the build refuses to ship</h2>
+
+  <p>
+    Those four rules need a person. The rules below do not — <code>npm run verify</code> runs on
+    every change and fails on any one of them:
+  </p>
+
+  <ul>
+    <li>
+      <strong>Frontmatter that breaks the schema.</strong> A title over 60 characters, a meta
+      description outside 140 to 160 characters inclusive, fewer than two keywords, fewer than
+      three related guides, or an <code>updated</code> value that is not a quoted
+      <code>YYYY-MM-DD</code> string.
+    </li>
+    <li>
+      <strong>An internal link that does not resolve.</strong> Every relative link on every
+      built page is checked against the routes the build actually generated, not against a list
+      someone maintains by hand.
+    </li>
+    <li>
+      <strong>A page nothing links to.</strong> An orphan fails, and so does any page carrying
+      fewer than three distinct internal links — including this one.
+    </li>
+    <li>
+      <strong>A code sample that has drifted.</strong> Every Python file under
+      <code>examples/</code> is compiled and then imported in its own subprocess, which catches
+      a sample calling a name a sibling file stopped exporting. Third-party imports are limited
+      to a declared allowlist, so a sample cannot depend on a package nobody agreed to, and
+      anything touching the Agentic Fabriq SDK is checked against the published surface, so it
+      cannot call a method that does not exist.
+    </li>
+    <li>
+      <strong>An SEO invariant broken on any built page.</strong> The suite parses every
+      generated HTML file and asserts a unique title of at most 60 characters, a unique meta
+      description of 140 to 160, an absolute canonical URL, Open Graph and Twitter tags,
+      parseable JSON-LD, exactly one <code>h1</code>, and no client-side JavaScript.
+    </li>
+  </ul>
+
+  <p>
+    The review bar is written down in <a href={contributing}>CONTRIBUTING.md</a> and the checks
+    themselves are in <a href={REPO_URL}>the repository</a>. Read them rather than taking this
+    page's word for it.
+  </p>
+
+  <h2>What goes stale first</h2>
+
+  <p>
+    Everything here has a shelf life and some of it is short. The most perishable material, in
+    roughly the order it moves:
+  </p>
+
+  <ul>
+    <li>
+      <strong>Protocol revisions.</strong> <a href="/connect/mcp-servers/">MCP servers</a>
+      describes a protocol that is versioned by date and revised on its own schedule. Transport
+      and authorization are the parts that have moved.
+    </li>
+    <li>
+      <strong>Pinned framework versions.</strong>
+      <a href="/connect/frameworks/">Agent frameworks</a> names specific releases, and agent
+      frameworks rename a decorator or move a module in a minor version.
+    </li>
+    <li>
+      <strong>Vendor scope strings and quota numbers.</strong> Slack, Google, and GitHub all
+      split scopes, rename them, and revise rate limits. That reaches
+      <a href="/govern/least-privilege/">least privilege</a> and every provider guide under
+      Connect.
+    </li>
+    <li>
+      <strong>Error codes and revocation behaviour.</strong> What a provider returns when a
+      grant is withdrawn is the literal most likely to be described from memory anywhere on the
+      internet, which is exactly why it is worth re-reading.
+    </li>
+  </ul>
+
+  <p>
+    Every guide carries an Updated date under its title, and that same date is in the page's
+    <code>Article</code> structured data as <code>dateModified</code>. Read it as the date the
+    guide's literals were last checked against a vendor page.
+  </p>
+
+  <p>
+    If a literal here disagrees with the vendor's current documentation, the vendor is right and
+    this page is wrong. Use their value, then tell us — a guide that is confidently wrong about
+    a scope string is worse than one that never covered the provider.
+  </p>
+
+  <h2>Who publishes this</h2>
+
+  <p>
+    The library is published by <a href="https://agenticfabriq.com">Agentic Fabriq</a>, which
+    sells a control layer for agent identity, permissions, credential vaulting, and audit. That
+    is a commercial interest in the subject matter, so here is how it is kept out of the way.
+  </p>
+
+  <p>
+    The body of every guide is vendor-neutral and teaches the do-it-yourself path in full,
+    including what that path costs to build and operate. Agentic Fabriq gets one clearly-labelled
+    section per guide — always the eighth, always titled "Doing this at scale" — and is kept out
+    of the TL;DR entirely, so a summary can never carry a pitch. Two to four links to the product
+    per guide, total; where one appears outside that section it is because the sentence it sits
+    in needed it. Strip the labelled section out and the guide still answers the question you
+    arrived with. That is the test each one is written to pass, and it is the test to hold this
+    page to.
+  </p>
+
+  <h2>Reporting an error</h2>
+
+  <p>
+    Open an issue on <a href={ISSUES_URL}>the repository's issue tracker</a>. The most useful
+    report names the page, quotes the literal, and links the vendor page that contradicts it;
+    with those three things a correction takes minutes. Corrections are the most valuable
+    contribution this project receives, ahead of new guides.
+  </p>
+
+  <p>
+    Fixes are made in the open. The site is built from a public repository, so every correction
+    is a commit with a message and a diff, and you can read what a page used to say and when it
+    changed. Nothing is edited silently. When a claim turns out to be wrong, the fix is applied
+    everywhere it was restated — the TL;DR, the checklist, and the FAQ entries included — because
+    a corrected body with a stale checklist twenty lines below it will have a reader reimplement
+    the bug the correction just removed.
+  </p>
+
+  <h2>Licensing</h2>
+
+  <p>
+    Prose is licensed <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>: use
+    it, adapt it, republish it commercially, with credit to Agentic Fabriq and a link back to
+    this site. Code — everything under <code>examples/</code>, the site source, and the check
+    scripts — is <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache-2.0</a>, so you can
+    lift a sample into a product without asking. Both licences are in the repository. The
+    external documentation each guide links is the vendor's, under whatever terms the vendor
+    sets.
+  </p>
+</BaseLayout>
