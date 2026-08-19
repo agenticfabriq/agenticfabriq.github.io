@@ -1,0 +1,93 @@
+{
+  "generator": "scripts/generate-og.mjs",
+  "template": 1,
+  "width": 1200,
+  "height": 630,
+  "default": "/og/default.png",
+  "images": {
+    "/og/default.png": {
+      "route": null,
+      "fingerprint": "81a8b0bbcbc01f13"
+    },
+    "/og/home.png": {
+      "route": "/",
+      "fingerprint": "26bd5cce5cd29d78"
+    },
+    "/og/about.png": {
+      "route": "/about/",
+      "fingerprint": "538437b2751631b8"
+    },
+    "/og/connect.png": {
+      "route": "/connect/",
+      "fingerprint": "30e3954a817acf66"
+    },
+    "/og/connect-databases.png": {
+      "route": "/connect/databases/",
+      "fingerprint": "a289cd62c612a8dc"
+    },
+    "/og/connect-drive-and-notion.png": {
+      "route": "/connect/drive-and-notion/",
+      "fingerprint": "21547ae66fa8fda6"
+    },
+    "/og/connect-frameworks.png": {
+      "route": "/connect/frameworks/",
+      "fingerprint": "d5e5d53faac04c49"
+    },
+    "/og/connect-github.png": {
+      "route": "/connect/github/",
+      "fingerprint": "ccf52ce23b6b99c1"
+    },
+    "/og/connect-gmail.png": {
+      "route": "/connect/gmail/",
+      "fingerprint": "ef325f08021b01b1"
+    },
+    "/og/connect-mcp-servers.png": {
+      "route": "/connect/mcp-servers/",
+      "fingerprint": "2eb8c201f821b83a"
+    },
+    "/og/connect-slack.png": {
+      "route": "/connect/slack/",
+      "fingerprint": "8b656895dc19a0a5"
+    },
+    "/og/govern.png": {
+      "route": "/govern/",
+      "fingerprint": "4a2979f0cf2a1cbe"
+    },
+    "/og/govern-audit.png": {
+      "route": "/govern/audit/",
+      "fingerprint": "78df3cd381ebcab2"
+    },
+    "/og/govern-credentials.png": {
+      "route": "/govern/credentials/",
+      "fingerprint": "661422125636e58b"
+    },
+    "/og/govern-delegated-identity.png": {
+      "route": "/govern/delegated-identity/",
+      "fingerprint": "ecd8d23754807ac0"
+    },
+    "/og/govern-least-privilege.png": {
+      "route": "/govern/least-privilege/",
+      "fingerprint": "70288c480b2f14e5"
+    },
+    "/og/govern-oauth-flows.png": {
+      "route": "/govern/oauth-flows/",
+      "fingerprint": "291ad4a81518f475"
+    },
+    "/og/fail.png": {
+      "route": "/fail/",
+      "fingerprint": "94a86c05fe4fbd7a"
+    },
+    "/og/fail-over-scoped-oauth.png": {
+      "route": "/fail/over-scoped-oauth/",
+      "fingerprint": "951bde9b32a5bb2b"
+    },
+    "/og/fail-runaway-loops.png": {
+      "route": "/fail/runaway-loops/",
+      "fingerprint": "87b874a836c4d0ad"
+    },
+    "/og/fail-token-leakage.png": {
+      "route": "/fail/token-leakage/",
+      "fingerprint": "750fceee7c2f8b42"
+    }
+  }
+}

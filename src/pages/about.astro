@@ -10,15 +10,15 @@ import {
   ISSUES_URL,
   REPO_URL,
 } from '../lib/seo';
+import { ABOUT_PAGE } from '../lib/site-pages.js';
 
 const guides = await getCollection('guides');
-const path = '/about/';
+const path = ABOUT_PAGE.path;
 const url = canonical(path);
 const updated = '2026-08-19';
 
-const title = 'About the Agent Integration Playbook';
-const description =
-  'Who publishes the Agent Integration Playbook, the editorial standard every guide is held to, what the build refuses to ship, and how to report an error.';
+const title = ABOUT_PAGE.title;
+const description = ABOUT_PAGE.description;
 
 const trail = [
   { name: 'Playbook', url: canonical('/') },

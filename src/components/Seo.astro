@@ -1,5 +1,14 @@
 ---
-import { canonical } from '../lib/seo';
+import { canonical, SITE_URL } from '../lib/seo';
+import {
+  DEFAULT_OG_CARD,
+  DEFAULT_OG_IMAGE,
+  OG_IMAGE_HEIGHT,
+  OG_IMAGE_WIDTH,
+  ogImageAlt,
+  ogImagePath,
+} from '../lib/og.js';
+import ogManifest from '../../public/og/manifest.json';
 
 interface Props {
   title: string;
@@ -11,6 +20,21 @@ interface Props {
 
 const { title, description, path, jsonLd = [], ogType = 'article' } = Astro.props;
 const url = canonical(path);
+
+/**
+ * The card for this page, if `scripts/generate-og.mjs` has drawn one. The
+ * manifest is the authority: a page added since the last generation falls back
+ * to the site-level card rather than pointing `og:image` at a 404 while still
+ * claiming `summary_large_image`. `npm run check:og` fails on that state, so the
+ * fallback is a safety net rather than a resting place.
+ */
+const derived = ogImagePath(path);
+const hasOwnCard = Object.prototype.hasOwnProperty.call(ogManifest.images, derived);
+const imagePath = hasOwnCard ? derived : DEFAULT_OG_IMAGE;
+
+/** Social crawlers do not resolve relative image URLs. */
+const imageUrl = `${SITE_URL}${imagePath}`;
+const imageAlt = hasOwnCard ? ogImageAlt(title) : ogImageAlt(DEFAULT_OG_CARD.title);
 ---
 <title>{title}</title>
 <meta name="description" content={description} />
@@ -20,9 +44,18 @@ const url = canonical(path);
 <meta property="og:description" content={description} />
 <meta property="og:url" content={url} />
 <meta property="og:site_name" content="Agent Integration Playbook" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:image" content={imageUrl} />
+<meta property="og:image:secure_url" content={imageUrl} />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content={String(OG_IMAGE_WIDTH)} />
+<meta property="og:image:height" content={String(OG_IMAGE_HEIGHT)} />
+<meta property="og:image:alt" content={imageAlt} />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content={title} />
 <meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={imageUrl} />
+<meta name="twitter:image:alt" content={imageAlt} />
 {jsonLd.map((block) => (
   <script type="application/ld+json" set:html={JSON.stringify(block).replace(/</g, '\\u003c')} />
 ))}

@@ -10,19 +10,24 @@
     "test": "vitest run",
     "lint:md": "markdownlint-cli2 \"src/content/**/*.md\" \"*.md\"",
     "check:links": "node scripts/check-links.mjs",
+    "og": "node scripts/generate-og.mjs",
+    "check:og": "node scripts/check-og.mjs",
     "check:samples": "node scripts/check-samples.mjs",
-    "verify": "npm run build && npm run test && npm run lint:md && npm run check:links && npm run check:samples"
+    "verify": "npm run build && npm run test && npm run lint:md && npm run check:links && npm run check:og && npm run check:samples"
   },
   "dependencies": {
-    "astro": "7.2.2",
+    "@astrojs/rss": "4.0.19",
     "@astrojs/sitemap": "3.7.3",
-    "@astrojs/rss": "4.0.19"
+    "astro": "7.2.2"
   },
   "devDependencies": {
-    "vitest": "4.1.10",
     "cheerio": "1.2.0",
     "fast-glob": "3.3.3",
+    "js-yaml": "4.3.1",
     "linkinator": "8.0.3",
-    "markdownlint-cli2": "0.23.2"
+    "markdownlint-cli2": "0.23.2",
+    "satori": "0.29.1",
+    "sharp": "0.35.3",
+    "vitest": "4.1.10"
   }
 }
