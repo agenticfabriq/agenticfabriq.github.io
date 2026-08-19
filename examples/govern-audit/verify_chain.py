@@ -10,11 +10,12 @@
 Both inputs work because both carry `canonical_form`: the exact byte string the
 emitter hashed. This verifier never re-derives that string from the record's
 fields, and that is the whole design. Re-deriving it is the obvious approach and
-it fails against a database -- PostgreSQL renders `timestamptz` with trailing
-zeros stripped, so a record emitted at ...:41.979180+00:00 reads back as
-...:41.97918+00:00 and rehashes differently. That produces a tamper alert on
-roughly one record in ten, and an integrity control that cries wolf is worse
-than none.
+it fails against a database. PostgreSQL renders `timestamptz` with a space
+instead of the T, a two-digit offset instead of +00:00, and trailing zeros
+stripped, so a record emitted at ...:41.979183+00:00 reads back as
+...:41.979183+00 and rehashes differently. Re-derivation therefore fails on
+EVERY record, not on some unlucky tenth of them, and an integrity control that
+cries wolf against a healthy store is worse than none.
 
 Four checks per record:
 
@@ -22,8 +23,11 @@ Four checks per record:
   * prev_hash equals the previous record's record_hash -- nothing was removed
     from the middle or reordered;
   * chain_seq increments by one -- the same, stated independently of any clock;
-  * the queryable columns still agree with canonical_form -- so editing a column
-    an investigator reads, while leaving the hashed bytes alone, is caught.
+  * every queryable column still agrees with canonical_form -- so editing a
+    column an investigator reads, while leaving the hashed bytes alone, is
+    caught. export.sql re-renders each column into the emitter's spelling, so
+    this covers occurred_at and the bytea and jsonb columns too, not only the
+    ones that happen to be plain text.
 
 Read the limits before you rely on this. It does NOT detect:
 
@@ -52,21 +56,18 @@ import json
 import sys
 from typing import Any, Iterator
 
-# Fields cross-checked between the queryable columns and the hashed bytes.
-# Deliberately all strings and integers: types that survive a round trip
-# unchanged. Timestamps are excluded because they do not, which is the bug this
-# whole file is shaped around.
-CROSS_CHECKED = (
-    "record_id",
-    "agent_id",
-    "principal_id",
-    "resource",
-    "action",
-    "decision",
-    "outcome",
-    "chain_id",
-    "chain_seq",
-)
+# Every field the exporter puts in `columns` is cross-checked -- there is no
+# allowlist here, on purpose. An earlier version named nine fields while the
+# docstring claimed the check covered what an investigator reads; that left
+# decision_reason, grant_id, untrusted_input and occurred_at unchecked, all four
+# of which investigate.sql prints. Adding a column to the exporter now extends
+# the check automatically instead of silently widening the gap.
+#
+# One field is necessarily absent, and its absence is not a gap: recorded_at is
+# stamped by the store and never reaches the emitter, so it is not in
+# canonical_form and there is nothing to compare it against. It is protected by
+# the writer holding no INSERT privilege on it, not by this file.
+NOT_IN_CANONICAL_FORM = frozenset({"recorded_at"})
 
 
 def read_lines(path: str) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -78,7 +79,11 @@ def read_lines(path: str) -> Iterator[tuple[int, dict[str, Any]]]:
             try:
                 yield line_number, json.loads(line)
             except json.JSONDecodeError as error:
-                raise SystemExit(f"{path}:{line_number}: not valid JSON: {error}") from error
+                # Report rather than raise, so one malformed record is listed
+                # alongside every other problem in the file. A verifier that
+                # aborts on the first bad line makes you fix an export one
+                # record at a time, which is how people end up not fixing it.
+                yield line_number, {"__malformed__": str(error)}
 
 
 def verify(path: str) -> list[str]:
@@ -90,6 +95,10 @@ def verify(path: str) -> list[str]:
 
     for line_number, line in read_lines(path):
         count += 1
+        if "__malformed__" in line:
+            problems.append(f"line {line_number}: not valid JSON: {line['__malformed__']}")
+            continue
+
         canonical_form = line.get("canonical_form")
         record_hash = line.get("record_hash")
 
@@ -101,7 +110,11 @@ def verify(path: str) -> list[str]:
             )
             continue
 
-        body = json.loads(canonical_form)
+        try:
+            body = json.loads(canonical_form)
+        except json.JSONDecodeError as error:
+            problems.append(f"line {line_number}: canonical_form is not valid JSON: {error}")
+            continue
         record_id = body.get("record_id", f"<line {line_number}>")
 
         computed = hashlib.sha256(canonical_form.encode("utf-8")).hexdigest()
@@ -123,13 +136,24 @@ def verify(path: str) -> list[str]:
                 f"sequence in chain {chain_id!r}, expected {expected_seq}"
             )
 
-        # Cross-check the queryable columns against the hashed bytes.
+        # Cross-check EVERY queryable column against the hashed bytes. Iterating
+        # the exporter's own output rather than a hand-maintained field list is
+        # what keeps this honest: a column added to the store and to export.sql
+        # is checked from that moment, with no second edit to remember.
         columns = line.get("columns", line)
-        for field in CROSS_CHECKED:
-            if field in columns and columns[field] != body.get(field):
+        for field, value in sorted(columns.items()):
+            if field in NOT_IN_CANONICAL_FORM or field in ("canonical_form", "record_hash"):
+                continue
+            if field not in body:
                 problems.append(
-                    f"{record_id}: column {field}={columns[field]!r} disagrees with "
-                    f"canonical_form {body.get(field)!r} -- the queryable copy was "
+                    f"{record_id}: column {field} is absent from canonical_form, "
+                    "so it was never hashed and nothing vouches for it"
+                )
+                continue
+            if value != body[field]:
+                problems.append(
+                    f"{record_id}: column {field}={value!r} disagrees with "
+                    f"canonical_form {body[field]!r} -- the queryable copy was "
                     "edited while the hashed bytes were left alone"
                 )
 
@@ -154,11 +178,11 @@ def main() -> None:
             print(problem, file=sys.stderr)
         raise SystemExit(1)
     print(
-        "chain intact -- no edit, no internal deletion, columns agree with the "
-        "hashed bytes. This does NOT prove the tail is complete or that every "
-        "record describes something that happened: compare the head hash "
-        "against your external anchor, and remember that whoever may append "
-        "may also append a lie."
+        "chain intact -- no edit, no internal deletion, and every exported "
+        "column agrees with the hashed bytes. This does NOT prove the tail is "
+        "complete or that any record describes something that happened: "
+        "compare the head hash against your external anchor, and remember that "
+        "whoever may append may also append a lie."
     )
 
 

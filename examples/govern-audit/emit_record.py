@@ -170,10 +170,13 @@ class SealedRecord:
         `canonical_form` duplicates every field above it, and that redundancy is
         deliberate. It is what lets a verifier check the hash without
         re-deriving the byte string, which is exactly what fails when records
-        come back out of a database: PostgreSQL renders `timestamptz` with
+        come back out of a database: PostgreSQL renders `timestamptz` with a
+        space instead of the T, a two-digit offset instead of +00:00, and
         trailing zeros stripped, so an occurred_at emitted as
-        ...:41.979180+00:00 reads back as ...:41.97918+00:00 and rehashes to a
-        different value. Hash the bytes, store the bytes, verify the bytes.
+        ...:41.979183+00:00 reads back as ...:41.979183+00 and rehashes to a
+        different value. That is EVERY record, not the tenth of them whose
+        microseconds happen to end in a zero. Hash the bytes, store the bytes,
+        verify the bytes.
         """
         payload = asdict(self.record)
         payload["canonical_form"] = self.canonical_form

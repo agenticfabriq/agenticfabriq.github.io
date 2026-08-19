@@ -90,13 +90,17 @@ CREATE TABLE audit.agent_action (
     -- canonical_form holds the exact byte string that was hashed. It duplicates
     -- the columns above, and that redundancy is the point: verification must not
     -- depend on every column surviving a round trip through PostgreSQL's type
-    -- rendering. It does not. `timestamptz` drops trailing zeros on output, so a
-    -- record emitted at ...:41.979180+00:00 reads back as ...:41.97918+00:00 and
-    -- rehashes to a different value -- a false tamper alert on roughly one
-    -- record in ten. Hash the bytes, store the bytes, verify the bytes.
+    -- rendering. It does not, and not marginally: `timestamptz` output uses a
+    -- space separator and a two-digit offset, and strips trailing zeros, so
+    --   2026-08-18T22:18:41.979183+00:00  reads back as
+    --   2026-08-18 22:18:41.979183+00
+    -- Re-deriving the hashed string from the columns therefore fails on EVERY
+    -- record, not on the subset whose microseconds end in a zero. Hash the
+    -- bytes, store the bytes, verify the bytes.
     --
     -- The typed columns above are for querying. This column is the evidence.
-    -- verify_chain.py cross-checks a few stable fields between the two, so a
+    -- export.sql re-renders every other column into its canonical spelling so
+    -- verify_chain.py can compare all of them against these bytes, so a
     -- store whose queryable columns were edited while canonical_form was left
     -- alone is still caught.
     canonical_form   text        NOT NULL,
@@ -133,7 +137,18 @@ CREATE TABLE audit.agent_action (
 CREATE TABLE audit.chain_head (
     chain_id   text   PRIMARY KEY,
     head_hash  bytea,
-    seq        bigint NOT NULL DEFAULT 0
+    seq        bigint NOT NULL DEFAULT 0,
+    -- The login identity that opened this chain. session_user, not current_user:
+    -- inside a SECURITY DEFINER function current_user is the function's owner,
+    -- while session_user stays the authenticated login even across SET ROLE.
+    -- Chains are owned so that one writer cannot read another writer's head,
+    -- and cannot stall another writer by holding its row lock.
+    owner      text   NOT NULL DEFAULT session_user,
+    -- Chain ids are created on demand by writers, so bound them. Without this a
+    -- writer can grow this table without limit by inventing ids; with it, the
+    -- damage is bounded per id and `SELECT count(*) FROM audit.chain_head`
+    -- is worth alerting on.
+    CONSTRAINT chain_head_id_sane CHECK (chain_id <> '' AND length(chain_id) <= 128)
 );
 
 -- Index for the query you will actually run. The real investigation is
@@ -178,8 +193,22 @@ SECURITY DEFINER
 SET search_path = pg_catalog, audit, pg_temp
 AS $fn$
 BEGIN
+    -- Claim the chain on first use, recording who claimed it.
     INSERT INTO audit.chain_head (chain_id) VALUES (p_chain_id)
         ON CONFLICT (chain_id) DO NOTHING;
+
+    -- Then refuse to hand out anything about a chain the caller does not own.
+    -- Without this, p_chain_id is an unscoped parameter: any caller could read
+    -- another emitter's head hash and sequence number despite holding no SELECT
+    -- anywhere in this schema, and could stall that emitter indefinitely by
+    -- taking the row lock below on a chain it has nothing to do with.
+    IF NOT EXISTS (
+        SELECT 1 FROM audit.chain_head h
+         WHERE h.chain_id = p_chain_id AND h.owner = session_user
+    ) THEN
+        RAISE EXCEPTION 'chain % is not owned by %', p_chain_id, session_user
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
 
     RETURN QUERY
         SELECT h.head_hash, h.seq + 1
@@ -204,14 +233,22 @@ AS $fn$
 DECLARE
     current_head bytea;
     current_seq  bigint;
+    found        boolean;
 BEGIN
-    INSERT INTO audit.chain_head (chain_id) VALUES (NEW.chain_id)
-        ON CONFLICT (chain_id) DO NOTHING;
-
-    SELECT h.head_hash, h.seq INTO current_head, current_seq
+    -- Deliberately does NOT create the chain. Creation happens in next_link and
+    -- nowhere else, so there is exactly one path by which this table grows, and
+    -- a writer that skips next_link fails here instead of quietly opening a
+    -- chain whose head it never locked.
+    SELECT true, h.head_hash, h.seq INTO found, current_head, current_seq
       FROM audit.chain_head h
-     WHERE h.chain_id = NEW.chain_id
+     WHERE h.chain_id = NEW.chain_id AND h.owner = session_user
        FOR UPDATE;
+
+    IF NOT found THEN
+        RAISE EXCEPTION 'chain % does not exist or is not owned by % -- call audit.next_link first',
+            NEW.chain_id, session_user
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
 
     IF NEW.prev_hash IS DISTINCT FROM current_head THEN
         RAISE EXCEPTION
@@ -264,7 +301,18 @@ GRANT INSERT (
     canonical_form, prev_hash, record_hash, chain_id, chain_seq
 ) ON audit.agent_action TO agent_writer;
 
-GRANT EXECUTE ON FUNCTION audit.next_link(text) TO agent_writer;
+-- REVOKE FIRST. PostgreSQL grants EXECUTE on every new function to PUBLIC, so
+-- without this line the GRANT below is decorative and `audit.next_link` is
+-- callable by every role in the database -- including the read-only auditor,
+-- which would then be able to create chains and take locks through a SECURITY
+-- DEFINER function while its direct INSERT is refused. A definer function is a
+-- hole punched through the privilege system on purpose; leaving it open to
+-- PUBLIC hands that hole to everyone.
+--
+-- Check it, do not assume it:
+--   SELECT proname, proacl FROM pg_proc WHERE proname = 'next_link';
+REVOKE EXECUTE ON FUNCTION audit.next_link(text) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION audit.next_link(text) TO agent_writer;
 
 GRANT SELECT ON audit.agent_action TO auditor;
 GRANT SELECT ON audit.chain_head   TO auditor;

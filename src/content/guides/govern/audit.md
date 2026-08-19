@@ -41,7 +41,7 @@ faq:
   - question: Should an agent audit log store the arguments passed to a tool?
     answer: Store a digest of the complete argument set plus an allowlisted subset of low-risk keys in the clear, not the raw arguments. The digest lets you confirm later that a specific argument set was the one used, while keeping credentials, document bodies, and personal data out of a store that many people can read and that you may be unable to delete from.
   - question: How do you prove an agent audit log has not been tampered with?
-    answer: Chain each record to a hash of the previous one, and store the exact bytes you hashed rather than re-deriving them from database columns, which do not round-trip. That detects any edited field and any record removed from the middle. It does not detect truncation of the tail, so publish the head hash and record count on a fixed cadence to a system under different credentials. It also cannot detect a false record appended by whoever holds the append privilege, which is why the component being audited should not be the component writing the records.
+    answer: Chain each record to a hash of the previous one, and store the exact bytes you hashed rather than re-deriving them from database columns, which do not round-trip — PostgreSQL alone changes the separator, the offset format, and trailing zeros on a timestamp. That detects any edited field and any record removed from the middle, provided you also compare every stored column back against those bytes rather than a subset of them. It does not detect truncation of the tail, so publish the head hash and record count on a fixed cadence to a system under different credentials. It also cannot detect a false record appended by whoever holds the append privilege, which is why the component being audited should not be the component writing the records.
 ---
 
 ## TL;DR
@@ -282,16 +282,40 @@ ERROR:  audit.agent_action is append-only (attempted TRUNCATE)
 
 **Hash chaining.** Each record carries a hash over all of its own fields plus the previous record's hash. Two things about building one are not obvious, and both bite in production rather than in a demo.
 
-*Store the bytes you hashed.* The natural implementation hashes a canonical serialisation of the record, writes the columns, and later re-derives that serialisation from the columns in order to verify. It does not work, because a database is not a byte store — it is a value store, and it renders values on the way out. PostgreSQL prints `timestamptz` with trailing zeros stripped:
+*Store the bytes you hashed.* The natural implementation hashes a canonical serialisation of the record, writes the columns, and later re-derives that serialisation from the columns in order to verify. It does not work, because a database is not a byte store — it is a value store, and it renders values on the way out. PostgreSQL prints `timestamptz` its own way:
 
 ```text
+in   2026-08-18T22:18:41.979183+00:00  ->  out  2026-08-18 22:18:41.979183+00
 in   2026-08-18T22:18:41.979180+00:00  ->  out  2026-08-18 22:18:41.97918+00
 in   2026-08-18T22:18:41.000000+00:00  ->  out  2026-08-18 22:18:41+00
 ```
 
-Re-serialise either of those and the hash changes. Roughly one timestamp in ten ends in a zero, so a verifier built this way reports tampering against a perfectly healthy store, on a schedule, forever — and an integrity control that cries wolf gets switched off, after which you have neither the control nor the alarm. So the schema carries `canonical_form text NOT NULL`, holding the exact string that was hashed, and `examples/govern-audit/export.sql` emits it verbatim instead of rebuilding it. The redundancy against the typed columns is the point: those columns are for querying, this one is the evidence. The verifier cross-checks a handful of stable fields between the two, so editing a column an investigator reads while leaving the hashed bytes alone is caught rather than silent.
+Look closely at what changed there, because it is not only the trailing zeros. The `T` became a space and `+00:00` became `+00`, so re-serialising fails on **every** record — not on some unlucky tenth whose microseconds happen to end in a zero. A verifier built this way reports tampering against a perfectly healthy store, on a schedule, forever, and an integrity control that cries wolf gets switched off, after which you have neither the control nor the alarm.
 
-*A chain has one head, so it admits one writer.* Two emitters that read the same head compute the same `prev_hash`, and the fork they produce is indistinguishable from tampering when the verifier runs. There are two ways out and you must pick one: serialise every writer on a chain behind a lock, or give each emitter its own chain and anchor each head separately. The schema does both — one chain per emitter, with the head handed out by a `SECURITY DEFINER` function under a row lock held until the writer commits, so two processes that accidentally share a chain id still cannot fork it. That function earns its keep twice over: the writer holds no `SELECT` anywhere in the schema, so it cannot read the chain head it needs. It gets that one value and nothing else.
+So the schema carries `canonical_form text NOT NULL`, holding the exact string that was hashed, and `examples/govern-audit/export.sql` emits it verbatim instead of rebuilding it. The redundancy against the typed columns is the point: those columns are for querying, this one is the evidence.
+
+That split creates a gap of its own, and it is worth closing properly rather than approximately. If the hash only covers `canonical_form`, then editing a *queryable* column — the copy an investigator actually reads — changes nothing the hash can see. So the exporter re-renders every column back into the emitter's spelling (`to_char` for `occurred_at`, `encode` for the `bytea` columns, `::text` for the enums) and the verifier compares all of them. That is 24 of the table's 27 columns; the other three are `record_hash`, which is checked by hashing, `canonical_form`, which is the thing being compared against, and `recorded_at`, which the emitter never sees and so was never hashed — that one is protected by the column-level grant above, not by the chain. Resist the temptation to cross-check a convenient subset: the first version of this checked nine columns of plain text and skipped `decision_reason`, `grant_id`, `untrusted_input`, and `occurred_at`, every one of which is printed by the investigation query in step 8.
+
+*A chain has one head, so it admits one writer.* Two emitters that read the same head compute the same `prev_hash`, and the fork they produce is indistinguishable from tampering when the verifier runs. There are two ways out and you must pick one: serialise every writer on a chain behind a lock, or give each emitter its own chain and anchor each head separately. The schema does both — one chain per emitter, with the head handed out by a `SECURITY DEFINER` function under a row lock held until the writer commits, so two processes that accidentally share a chain id still cannot fork it. That function earns its keep twice over: the writer holds no `SELECT` anywhere in the schema, so it cannot read the chain head it needs, and the function hands it that one value and nothing else.
+
+A `SECURITY DEFINER` function is a hole punched through the privilege system on purpose, so close it behind you. Two lines, in this order:
+
+```sql
+REVOKE EXECUTE ON FUNCTION audit.next_link(text) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION audit.next_link(text) TO agent_writer;
+```
+
+Without the `REVOKE`, the `GRANT` is decorative — PostgreSQL grants `EXECUTE` on every new function to `PUBLIC`, so the read-only auditor role can call it too, creating chains and taking locks through a definer function while its direct `INSERT` is refused. Check it rather than assuming it, with `SELECT proname, proacl FROM pg_proc WHERE proname = 'next_link'`; a bare `=X/` entry is `PUBLIC`. Afterwards the auditor gets the answer it should:
+
+```text
+ERROR:  permission denied for function next_link
+```
+
+Scope the parameter too. `p_chain_id` is caller-supplied, so a function that locks and reads whatever chain it is handed lets one writer read another's head and stall it by holding its row lock. The schema records an `owner` on each chain — `session_user`, because `current_user` inside a definer function is the function's owner — and refuses anything else:
+
+```text
+ERROR:  chain chain:emitter-1 is not owned by other_svc
+```
 
 The lock does what locks do. Two writers on one chain, the first sleeping 1.5 seconds before committing:
 
@@ -319,7 +343,7 @@ With that in place, `examples/govern-audit/verify_chain.py` walks an export. Tes
               canonical_form 'user:ada@example.com'
 ```
 
-*Buys:* detection of any edited field, any record removed from the middle, and any divergence between the queryable copy and the hashed bytes — using only the data itself, no trusted third party, no special storage. *Costs:* a hash per write, a lock per chain, one duplicated column, and the discipline to actually run the verifier, since an unverified chain proves nothing. *Does not buy:* three things, and the third is the one people miss.
+*Buys:* detection of any edited field, any record removed from the middle, and any divergence between the hashed bytes and the 24 exported columns — using only the data itself, no trusted third party, no special storage. *Costs:* a hash per write, a lock per chain, one duplicated column, and the discipline to actually run the verifier, since an unverified chain proves nothing. *Does not buy:* three things, and the third is the one people miss.
 
 Truncation is undetectable — lopping off the last N records leaves a chain that verifies perfectly. An attacker who can modify records can recompute every hash from the edit forward. And, the important one, **anyone who can append can forge**. A well-formed record chained to the genuine head, describing an approval that never happened, verifies clean; appending is precisely what that role is permitted to do. Demonstrated against this schema as `agent_writer`, with a `decision_reason` of "FABRICATED: this call never happened", the verifier exits 0 and prints "chain intact". The role that can do this is the application — the component under audit. That is not a flaw in the chain. It is the structural reason the emitter should not be the thing it describes, which is the argument the scale section below picks up.
 
@@ -457,6 +481,8 @@ The honest summary: the first column is not a real option, and the choice betwee
 - [ ] The writer's `INSERT` is granted column by column and omits `recorded_at`; an insert naming it fails with `permission denied`.
 - [ ] The service account running agents cannot `UPDATE`, `DELETE`, or `TRUNCATE` the audit table — confirmed against `pg_class.relacl`, not against a `REVOKE` statement that may be a no-op.
 - [ ] The exact bytes that were hashed are stored, and the verifier reads those bytes rather than re-deriving them from typed columns.
+- [ ] The verifier cross-checks **every** column against those bytes, not a convenient subset of the plain-text ones — confirmed by editing a column it does not obviously cover, such as `decision_reason` or `occurred_at`, and watching it fail.
+- [ ] Any `SECURITY DEFINER` function has `EXECUTE` revoked from `PUBLIC`; verified with `SELECT proname, proacl FROM pg_proc`, since PostgreSQL grants it to `PUBLIC` on creation and a later `GRANT` to your writer changes nothing.
 - [ ] The chain is verified against an export from the **store**, not only against the emitter's stdout — those are different code paths and only one of them is what you will have during an incident.
 - [ ] Writers on a single chain are serialised, or each emitter owns a chain and each chain's head is anchored separately.
 - [ ] The hash chain is verified on a schedule, and the head hash is anchored somewhere the store's operator does not control.
