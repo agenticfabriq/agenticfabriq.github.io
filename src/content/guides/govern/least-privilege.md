@@ -7,7 +7,7 @@ keywords:
   - "oauth scopes for ai agents"
   - "least privilege ai agent"
   - "agent tool permissions review"
-  - "unused oauth scope audit"
+  - "minimum oauth scopes for an ai agent"
 relatedGuides:
   - govern/oauth-flows
   - govern/audit

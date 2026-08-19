@@ -1,6 +1,6 @@
 ---
 title: "OAuth Flows for AI Agents: The Three Grants That Matter"
-description: The three OAuth grants an AI agent actually needs, why RFC 8693 token exchange is the one most teams skip, and how to scope a downstream token down.
+description: "The three OAuth grants an AI agent actually needs, why RFC 8693 token exchange is the one most teams skip, and how to scope a downstream token down."
 pillar: govern
 updated: "2026-08-18"
 keywords:

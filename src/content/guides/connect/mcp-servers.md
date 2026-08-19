@@ -1,10 +1,10 @@
 ---
 title: "Securing an MCP Server: Authorization and Tool Scope"
-description: "What the 2026-07-28 revision changed, where authentication really sits, how to authorize per tool and per argument, and the confused deputy problem."
+description: "Where MCP authentication really sits, how to authorize per tool and per argument, and why a server that lets the model choose the target is a confused deputy."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - "mcp 2026-07-28 spec security"
+  - "mcp server security"
   - "mcp tool authorization per user"
   - "mcp confused deputy"
   - "mcp server/discover"

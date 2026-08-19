@@ -1,5 +1,5 @@
 ---
-title: "AI Agent Access to Google Drive and Notion: Scopes First"
+title: "AI Agent Access to Google Drive and Notion: Grant Boundaries"
 description: "Pick drive.file over the restricted Drive scopes, put the Picker in the grant loop, and understand why one Notion share hands over a whole page subtree."
 pillar: connect
 updated: "2026-08-18"

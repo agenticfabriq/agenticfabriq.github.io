@@ -36,10 +36,10 @@ did not ask for.
 - [Give an AI Agent Safe Access to Your Postgres Database](https://agenticfabriq.github.io/connect/databases/)
   — Give an agent a dedicated Postgres role, row-level security keyed to the acting user,
   statement timeouts, and parameterized tools instead of raw SQL.
-- [AI Agent Access to Google Drive and Notion: Scopes First](https://agenticfabriq.github.io/connect/drive-and-notion/)
+- [AI Agent Access to Google Drive and Notion: Grant Boundaries](https://agenticfabriq.github.io/connect/drive-and-notion/)
   — Pick drive.file over the restricted Drive scopes, put the Picker in the grant loop, and
   understand why one Notion share hands over a whole page subtree.
-- [Per-User Credentials in LangChain, CrewAI, Agents SDK](https://agenticfabriq.github.io/connect/frameworks/)
+- [Per-User Credentials in LangChain, CrewAI, OpenAI Agents SDK](https://agenticfabriq.github.io/connect/frameworks/)
   — One tool built three times in LangChain, CrewAI, and the OpenAI Agents SDK, with the
   per-user credential resolved at call time rather than at import.
 - [Give an AI Agent GitHub Access with a GitHub App](https://agenticfabriq.github.io/connect/github/)
@@ -49,8 +49,8 @@ did not ask for.
   — Pick the narrowest Gmail scope, run the PKCE consent flow, refresh tokens correctly, and
   avoid the seven-day expiry that breaks Testing-status apps.
 - [Securing an MCP Server: Authorization and Tool Scope](https://agenticfabriq.github.io/connect/mcp-servers/)
-  — What the 2026-07-28 revision changed, where authentication really sits, how to authorize
-  per tool and per argument, and the confused deputy problem.
+  — Where MCP authentication really sits, how to authorize per tool and per argument, and
+  why a server that lets the model choose the target is a confused deputy.
 - [Slack Bot Scopes and Security for an AI Agent](https://agenticfabriq.github.io/connect/slack/)
   — Which Slack bot scopes an agent needs, how to verify the request signature, Socket Mode
   versus a request URL, and the rate limits that throttle reads.
