@@ -44,7 +44,7 @@ faq:
 
 - A module-level API key read from the environment is a single-tenant design. It works until two users with different access share one process, and then every action is attributed to whoever owns the key.
 - All three frameworks have a per-invocation seam for user identity, and it is not the tool arguments: `ToolRuntime[Ctx]` in LangChain, `RunContextWrapper[Ctx]` in the OpenAI Agents SDK, and in CrewAI the tool instance itself, because it has no context object at all.
-- Every one of the three will put an exception string in front of the model unless you stop it. The OpenAI Agents SDK and CrewAI interpolate `str(error)` by default; LangChain instead re-raises and kills the run, which is a different problem with the same cause.
+- None of the three defaults are what you want. The OpenAI Agents SDK and CrewAI interpolate `str(error)` in front of the model; LangChain re-raises anything that is not a schema-validation error and kills the run instead, which is a different problem with the same cause.
 - Retry behaviour differs more than the docs suggest. CrewAI re-executes a raising tool up to six times per model tool call, LangChain retries nothing until you add middleware and then retries every exception by default, and the OpenAI Agents SDK never retries a function tool.
 - Written against langchain 1.3.15 with langgraph 1.2.11, crewai 1.15.16, and openai-agents 0.21.1. These APIs move; check the version you have before copying anything below.
 
@@ -108,7 +108,7 @@ def post_message(token: str, channel: str, text: str) -> str:
 
 Two details are load-bearing. `resolve_token` takes the user id as an argument instead of reading a global, so nothing is captured at import. And the `ok` check exists because Slack's Web API returns HTTP 200 with `{"ok": false, "error": "channel_not_found"}` for application errors — `raise_for_status()` alone sees a successful call. The documented error codes on `chat.postMessage` include `channel_not_found`, `not_in_channel`, `missing_scope`, `invalid_auth`, `token_revoked`, and `ratelimited`; only some of those are safe to repeat to a model, and `model_safe_text` in the same file draws that line once so all three frameworks inherit it.
 
-The `timeout=10.0` matters more than it looks. Of the three frameworks, only the OpenAI Agents SDK has a per-tool timeout, and it only applies to async handlers. In the other two, the timeout on your HTTP client is the only thing standing between a hung socket and an agent run that never returns.
+The `timeout=10.0` matters more than it looks. Of the three frameworks, only the OpenAI Agents SDK has a per-tool timeout, and it only applies to async handlers. Neither of the other two will interrupt one blocked call: CrewAI's `max_execution_time` is documented as a maximum for *task* execution rather than for a single socket read and is unset by default, and LangChain has no equivalent knob at all. So in those two the timeout on your HTTP client is what stops a hung socket from becoming a run that never returns.
 
 ### 2. LangChain: the runtime parameter the model cannot see
 

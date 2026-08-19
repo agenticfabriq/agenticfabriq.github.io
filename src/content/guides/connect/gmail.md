@@ -56,7 +56,7 @@ You are wiring an agent into a real mailbox — triage, drafting, extraction, es
 
 The default path is a trap that closes slowly. A tutorial hands you `https://mail.google.com/` because it makes every call work on the first try, and the agent ships. Six weeks later the same grant is still in place, and it now covers a mailbox that has accumulated a legal thread, a compensation discussion, and a customer's bank details in an attachment. The agent does not need any of that, but the mailbox does not know that — a single `messages.get` pulls a full thread body, every participant's address, and every attachment straight into a model's context window. Read [what actually breaks in production](/fail/) for the shape this takes once that context is logged, cached, or forwarded to a third-party inference endpoint.
 
-The capability side is worse than the exposure side. That same convenient scope carries permanent deletion, with no trash to recover from, so the agent is one prompt injection away from destroying mail that has no undo. Nobody chose that risk. It arrived attached to a scope string.
+The capability side is worse than the exposure side. That same convenient scope carries permanent deletion, which bypasses the trash a user could have recovered from — Google's `messages.delete` reference says the operation cannot be undone. On Workspace one recovery path survives that, an administrator's *Restore data* tool, and its bounds are narrow: Google gives an admin 25 days, measured from 30 days after deletion, and says that after it messages "can't be restored by an admin or by Google". Whether that clock ever starts for a message that never entered the trash is not something Google's pages say, so plan for the deletion being final and confirm the rest with your own administrator rather than with this page. Nobody chose that risk. It arrived attached to a scope string.
 
 Then there is the failure that wastes a week. The agent runs perfectly for seven days and dies on the eighth with `invalid_grant`, for every user at once. Nothing in the refresh logic is wrong; the expiry is a property of the OAuth client's publishing status, which is not where anyone looks first. Failure modes below has the mechanism and the fix.
 
@@ -84,7 +84,7 @@ These are the Gmail scopes worth knowing, taken from Google's scope reference:
 | `https://www.googleapis.com/auth/gmail.modify` | Read, compose, send, and move to trash. Not immediate permanent deletion. | Restricted |
 | `https://mail.google.com/` | Read, compose, send, and permanently delete all mail. | Restricted |
 
-Two distinctions carry most of the weight. First, `gmail.send` is a write-only capability: it lets an agent send a message but gives it no way to list, read, or search the mailbox it sends from. That asymmetry is useful — a notification agent needs `gmail.send` and nothing else. Second, `gmail.modify` stops short of immediate permanent deletion; deleted mail goes to trash and can be recovered. The only thing `https://mail.google.com/` adds over `gmail.modify` is irreversible destruction plus full IMAP-equivalent access.
+Two distinctions carry most of the weight. First, `gmail.send` is a write-only capability: it lets an agent send a message but gives it no way to list, read, or search the mailbox it sends from. That asymmetry is useful — a notification agent needs `gmail.send` and nothing else. Second, `gmail.modify` stops short of immediate permanent deletion; deleted mail goes to trash and can be recovered. What `https://mail.google.com/` adds over `gmail.modify` is immediate permanent deletion plus full IMAP-equivalent access.
 
 That is why a reviewer seeing `https://mail.google.com/` in a pull request should ask one question: *which call requires permanent deletion?* If the answer is not `messages.delete` on messages the agent itself created, the correct scope is `gmail.modify` or narrower, and the diff goes back. This is the single highest-value review comment on the whole integration. The [governance pillar](/govern/) covers how to make that check systematic rather than a matter of who happened to read the diff.
 
@@ -193,7 +193,7 @@ def get_thread(token: AccessToken, thread_id: str) -> dict:
 
 Base URL is `https://gmail.googleapis.com/gmail/v1/users/me`. `maxResults` defaults to 100 and caps at 500. Message bodies arrive base64url-encoded inside a nested MIME part tree, so decoding means walking `payload.parts` for the first `text/plain` node — `plain_text()` in the example file does exactly that.
 
-Look at what one `format=full` call hands your agent: the message's entire MIME tree — the full body, every address on `From`, `To`, `Cc`, and `Reply-To`, and each attachment part with its filename. `threads.get` returns that for every message in the conversation, which is why it costs 40 units instead of 20. Almost none of it is what the agent asked for, and all of it ends up in whatever your model provider logs. Truncate before the prompt, not after.
+Look at what one `format=full` call hands your agent: the message's entire MIME tree — the full body, every address on `From`, `To`, `Cc`, and `Reply-To`, and each attachment part with its filename. `threads.get` returns that for every message in the conversation, which is why it costs 40 units instead of 20. Almost none of it is what the agent asked for, and whatever reaches the prompt reaches your model provider on whatever retention its terms set — [token leakage through agent context](/fail/token-leakage/) has the numbers for one provider and the method for checking your own. Truncate before the prompt, not after.
 
 ### 8. Send the reply, and widen the grant to do it
 
@@ -250,7 +250,7 @@ The narrow case where it is right: an unattended Workspace-internal job over mai
 
 **Cause:** the OAuth client has an external user type and a publishing status of Testing. Google issues seven-day refresh tokens to those clients, and the authorization expires seven days after consent.
 
-**Fix:** move the client to In production, which for restricted scopes means completing verification. There is no configuration flag that extends the seven days. If you are mid-verification, be explicit with pilot users that they will re-consent weekly rather than letting them discover it.
+**Fix:** move the client to In production, which for restricted scopes means completing verification. Google documents no setting that extends the seven days; the publishing status is the control. If you are mid-verification, be explicit with pilot users that they will re-consent weekly rather than letting them discover it.
 
 ### `invalid_grant` for one user, at 3am, with no deploy
 
@@ -363,6 +363,8 @@ Primary sources for everything asserted above:
 - [OAuth 2.0 for mobile and desktop apps](https://developers.google.com/identity/protocols/oauth2/native-app) — PKCE verifier and challenge rules, loopback redirects, `https://oauth2.googleapis.com/revoke`, the cascade from an access token to its refresh token, and the note that revocation can take some time to take full effect.
 - [Using OAuth 2.0 to access Google APIs](https://developers.google.com/identity/protocols/oauth2) — refresh token expiration causes, the seven-day Testing rule, and the 100-token limit.
 - [Gmail API usage limits](https://developers.google.com/workspace/gmail/api/reference/quota) — per-minute quota ceilings and the per-method unit costs.
+- [`users.messages.delete`](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/delete) — that the deletion is immediate and permanent and that the operation cannot be undone.
+- [Restore a user's permanently deleted email](https://knowledge.workspace.google.com/admin/support/troubleshooting/restore-a-users-permanently-deleted-email) — the administrator-only *Restore data* path, its 25-day window measured from 30 days after deletion, and that nothing is restorable after it.
 - [Handle Gmail API errors](https://developers.google.com/workspace/gmail/api/guides/handle-errors) — the 403 and 429 reason strings and the backoff guidance.
 - [Push notifications](https://developers.google.com/workspace/gmail/api/guides/push) — `users.watch`, Pub/Sub setup, and the seven-day watch expiry.
 - [Using OAuth 2.0 for server to server applications](https://developers.google.com/identity/protocols/oauth2/service-account) — domain-wide delegation, its admin authorization steps, and that it reaches user data without requiring the users' consent.
