@@ -1,15 +1,13 @@
 ---
-title: OAuth Flows for AI Agents
+title: "OAuth Flows for AI Agents: The Three Grants That Matter"
 description: The three OAuth grants an AI agent actually needs, why RFC 8693 token exchange is the one most teams skip, and how to scope a downstream token down.
 pillar: govern
 updated: "2026-08-18"
 keywords:
-  - oauth for ai agents
-  - token exchange rfc 8693
-  - client credentials agent
-  - pkce s256
-  - refresh token rotation
-  - audience restriction
+  - "oauth for ai agents"
+  - "which oauth flow should an ai agent use"
+  - "oauth token exchange for ai agents"
+  - "oauth client credentials vs authorization code for agents"
 relatedGuides:
   - govern/delegated-identity
   - govern/credentials

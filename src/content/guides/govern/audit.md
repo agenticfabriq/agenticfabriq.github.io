@@ -1,15 +1,13 @@
 ---
-title: Audit Trails and Compliance for Agent Actions
-description: "What belongs in an AI agent audit log, field by field: both principals, the policy decision, immutability, redaction, retention, and the query you will run."
+title: "AI Agent Audit Log: Schema, Immutability, Retention"
+description: "What belongs in an AI agent audit log, field by field: both principals, the policy decision, an append-only store, redaction, and how long to keep it."
 pillar: govern
 updated: "2026-08-18"
 keywords:
-  - ai agent audit log
-  - agent action attribution
-  - agent compliance evidence
-  - append-only audit store
-  - audit record schema
-  - agent audit retention
+  - "ai agent audit log"
+  - "what to log for ai agent activity"
+  - "does soc 2 require an immutable audit log"
+  - "tamper-evident append-only audit log"
 relatedGuides:
   - govern/delegated-identity
   - govern/least-privilege

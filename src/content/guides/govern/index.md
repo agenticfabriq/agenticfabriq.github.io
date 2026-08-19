@@ -1,16 +1,15 @@
 ---
-title: Agent Identity and Permissions
-description: An agent is neither a person nor a service, and identity systems were built for those two. How to give one a provable identity, decide per call, and revoke it.
+title: "AI Agent Identity and Permissions: Not a Service Account"
+description: "Why an AI agent is neither a user nor a service account, how to model agent, user, resource and action as a matrix, and how to test revocation."
 pillar: govern
 updated: "2026-08-18"
 cornerstone: true
 keywords:
-  - ai agent identity
-  - agent permissions
-  - agent access control
-  - agent authorization
-  - delegated agent authority
-  - agent revocation
+  - "ai agent identity vs service account"
+  - "ai agent permissions"
+  - "how to revoke an ai agent's access"
+  - "ai agent access control"
+  - "ai agent identity"
 relatedGuides:
   - govern/oauth-flows
   - govern/least-privilege

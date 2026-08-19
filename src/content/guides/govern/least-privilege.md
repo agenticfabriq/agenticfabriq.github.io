@@ -1,15 +1,13 @@
 ---
-title: Designing Least-Privilege Scopes for Agents
-description: "A repeatable method for scoping an AI agent: enumerate the actions from its tool definitions, map each to the narrowest scope, remove the rest, and ratchet."
+title: "OAuth Scopes for AI Agents: A Least-Privilege Method"
+description: "Enumerate an agent's actions from its tool definitions, map each to the narrowest provider scope, remove the rest, and report unused scopes monthly."
 pillar: govern
 updated: "2026-08-18"
 keywords:
-  - least privilege ai agent
-  - agent scope design
-  - oauth scope review
-  - agent tool permissions
-  - just-in-time access
-  - unused scope audit
+  - "oauth scopes for ai agents"
+  - "least privilege ai agent"
+  - "agent tool permissions review"
+  - "unused oauth scope audit"
 relatedGuides:
   - govern/oauth-flows
   - govern/audit

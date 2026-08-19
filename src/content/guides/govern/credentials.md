@@ -1,15 +1,13 @@
 ---
-title: Credential Vaulting and Rotation for Agents
-description: Why an environment variable cannot express per-user access, how to issue short-lived credentials per request, and how to rotate and revoke without downtime.
+title: "AI Agent Credential Management: Issue, Rotate, Revoke"
+description: "Why an environment variable cannot express per-user access, how to issue a short-lived credential per request, and how to rotate with no downtime."
 pillar: govern
 updated: "2026-08-18"
 keywords:
-  - agent credential management
-  - secret rotation agent
-  - short lived credentials
-  - workload identity federation
-  - credential vaulting
-  - zero downtime secret rotation
+  - "ai agent credential management"
+  - "short-lived credentials for ai agents"
+  - "zero downtime secret rotation"
+  - "ai agent secrets management"
 relatedGuides:
   - govern/oauth-flows
   - govern/audit

@@ -58,24 +58,24 @@ did not ask for.
 Identity, permissions, credentials, and audit — the decisions you make once and apply
 everywhere, rather than re-arguing them per provider.
 
-- [Agent Identity and Permissions](https://agenticfabriq.github.io/govern/)
-  (cornerstone) — An agent is neither a person nor a service, and identity systems were
-  built for those two. How to give one a provable identity, decide per call, and revoke it.
-- [OAuth Flows for AI Agents](https://agenticfabriq.github.io/govern/oauth-flows/) —
-  The three OAuth grants an AI agent actually needs, why RFC 8693 token exchange is the
+- [AI Agent Identity and Permissions: Not a Service Account](https://agenticfabriq.github.io/govern/) (cornerstone)
+  — Why an AI agent is neither a user nor a service account, how to model agent, user,
+  resource and action as a matrix, and how to test revocation.
+- [OAuth Flows for AI Agents: The Three Grants That Matter](https://agenticfabriq.github.io/govern/oauth-flows/)
+  — The three OAuth grants an AI agent actually needs, why RFC 8693 token exchange is the
   one most teams skip, and how to scope a downstream token down.
-- [Delegated User Identity for Agents](https://agenticfabriq.github.io/govern/delegated-identity/)
-  — Acting for a user is not acting as one. How to intersect agent and user permissions,
-  exchange a token on behalf of a caller, and audit both principals.
-- [Designing Least-Privilege Scopes for Agents](https://agenticfabriq.github.io/govern/least-privilege/)
-  — A repeatable method for scoping an AI agent: enumerate the actions from its tool
-  definitions, map each to the narrowest scope, remove the rest, and ratchet.
-- [Credential Vaulting and Rotation for Agents](https://agenticfabriq.github.io/govern/credentials/)
-  — Why an environment variable cannot express per-user access, how to issue short-lived
-  credentials per request, and how to rotate and revoke without downtime.
-- [Audit Trails and Compliance for Agent Actions](https://agenticfabriq.github.io/govern/audit/)
+- [Agent Delegation vs Impersonation: On-Behalf-Of Flows](https://agenticfabriq.github.io/govern/delegated-identity/)
+  — Acting for a user is not acting as one. How to run an on-behalf-of token exchange,
+  intersect agent and user permissions, and audit both principals.
+- [OAuth Scopes for AI Agents: A Least-Privilege Method](https://agenticfabriq.github.io/govern/least-privilege/)
+  — Enumerate an agent's actions from its tool definitions, map each to the narrowest
+  provider scope, remove the rest, and report unused scopes monthly.
+- [AI Agent Credential Management: Issue, Rotate, Revoke](https://agenticfabriq.github.io/govern/credentials/)
+  — Why an environment variable cannot express per-user access, how to issue a short-lived
+  credential per request, and how to rotate with no downtime.
+- [AI Agent Audit Log: Schema, Immutability, Retention](https://agenticfabriq.github.io/govern/audit/)
   — What belongs in an AI agent audit log, field by field: both principals, the policy
-  decision, immutability, redaction, retention, and the query you will run.
+  decision, an append-only store, redaction, and how long to keep it.
 
 ## Fail
 

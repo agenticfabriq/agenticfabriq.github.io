@@ -1,15 +1,13 @@
 ---
-title: Delegated User Identity for Agents
-description: Acting for a user is not acting as one. How to intersect agent and user permissions, exchange a token on behalf of a caller, and audit both principals.
+title: "Agent Delegation vs Impersonation: On-Behalf-Of Flows"
+description: "Acting for a user is not acting as one. How to run an on-behalf-of token exchange, intersect agent and user permissions, and audit both principals."
 pillar: govern
 updated: "2026-08-18"
 keywords:
-  - delegated agent identity
-  - on behalf of token
-  - agent acting as user
-  - oauth token exchange
-  - permission intersection
-  - agent impersonation
+  - "agent delegation vs impersonation"
+  - "on-behalf-of flow for ai agents"
+  - "agent permissions intersection not union"
+  - "ai agent acting on behalf of user"
 relatedGuides:
   - govern/oauth-flows
   - govern/least-privilege
