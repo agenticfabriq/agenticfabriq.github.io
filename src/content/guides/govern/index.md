@@ -138,6 +138,8 @@ For the on-call assistant, the intended cells are these, and the last column is 
 
 Four rows. Everything else is denied, including things nobody has thought of, because the matrix is a list of what is permitted rather than a list of what is forbidden.
 
+One row carries a cost worth naming before you copy it. The issue is filed because an engineer asked, but the installation token writes it under the app's identity, so GitHub's own record names the app and not the human — and GitHub's [best-practice page](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app) says that if an app takes an action on behalf of a user it should always use a user access token instead of an installation access token. The row keeps the installation token because the agent also files issues on its own schedule, which is exactly the trade [connecting an agent to GitHub](/connect/github/) works through; the price is that the action-to-human mapping exists only in your own record, and step 7 is where it has to be kept.
+
 Two properties of this table are worth stating before anyone extends it.
 
 **It is sparse on purpose, and it is not the same size as the system.** One agent, forty engineers, three resources and four verbs is 480 addressable cells. You do not write 480 rules. You write rules over axes — this action is user-scoped, this resource class is agent-owned — and the matrix is what those rules resolve to. What the matrix buys is that every rule you write has a place to be written, which is the thing a scope string cannot give you.
@@ -159,7 +161,7 @@ An identity is three things: a name that is stable and unique, a way to prove yo
 Three consequences follow, and each maps onto an axis:
 
 - **The agent axis disappears.** Every holder is one principal, so no policy can distinguish them, and no log can either.
-- **The revocation granularity collapses to the key.** Rotating it stops the agent, the cron job, and both engineers simultaneously — which is why nobody rotates it during an incident, which is the whole problem.
+- **The revocation granularity collapses to the key.** Rotating it stops the agent, the cron job, and both engineers simultaneously, so the smallest available action is an outage for three other things.
 - **Its authority becomes a union.** A credential that must satisfy every caller has to be able to do everything any caller needs.
 
 The nuance that keeps this honest: being a bearer token is not the flaw. A bearer token issued to exactly one agent, short-lived, and audience-restricted is a perfectly good agent credential, because the identity comes from *who it was issued to* rather than from who holds it — and the receiving side is what enforces that. [RFC 9068 section 4](https://www.rfc-editor.org/rfc/rfc9068#section-4) puts the rule on the resource server: a JWT access token "MUST be rejected if `aud` does not contain a resource indicator of the current resource server as a valid audience." Sharing and unbounded lifetime are the flaws, not the bearer property.
@@ -167,8 +169,8 @@ The nuance that keeps this honest: being a bearer token is not the flaw. A beare
 Where the agent's own name comes from, in practice:
 
 - **A provider-native app identity** — a Slack app, a GitHub App installation. Already per-application, already revocable on its own, and the natural fit for the agent-as-principal rows of the matrix.
-- **Its own OAuth client**, using the `client_credentials` grant for work with no user in it. [RFC 6749 section 4.4.3](https://www.rfc-editor.org/rfc/rfc6749#section-4.4.3) even says a refresh token "SHOULD NOT be included", because the client can simply authenticate again.
-- **A workload identity it cannot choose** — a Kubernetes projected service account token, an instance metadata credential, a CI OIDC token. This is the strongest form, because the agent does not hold a secret that can be copied out of it, and [credential vaulting and rotation](/govern/credentials/) covers the trust chain behind each one and the specific ways each is misconfigured.
+- **Its own OAuth client**, using the `client_credentials` grant for work with no user in it. [RFC 6749 section 4.4.3](https://www.rfc-editor.org/rfc/rfc6749#section-4.4.3) even says a refresh token "SHOULD NOT be included" in the response to this grant. The section does not say why; the reason that matters here is that a client holding its own credentials can simply authenticate again, so there is no standing artifact to steal.
+- **A workload identity it cannot choose** — a Kubernetes projected service account token, an instance metadata credential, a CI OIDC token. This is the strongest form, and it is worth being precise about why, because the obvious reason is wrong. The material is still copyable — a projected token is a file in the pod, the instance metadata service answers anything that can make an HTTP request from inside the instance, which is why an SSRF bug is credential theft. What changes is that the agent holds no long-lived secret it chose: what it does hold is short-lived and audience-bound, so a stolen copy expires rather than persists. [Credential vaulting and rotation](/govern/credentials/) covers the trust chain behind each one and the specific ways each is misconfigured.
 
 Whichever you use, the test is the same: at the resource, can you answer "which agent is this?" without reference to any human, and would the answer change if a different agent were calling?
 
@@ -187,7 +189,7 @@ Four things exist only at call time, and each is a real control:
 
 The mechanisms are real and shipping, not hypothetical. [AWS session policies](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html) compute an intersection per session, and AWS states the rule directly: "The permissions for a session are the intersection of the identity-based policies for the IAM entity (user or role) used to create the session and the session policies." IAM `Condition` blocks are evaluated per request. [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662.html) token introspection answers `active` per call, at the cost of a round trip. Microsoft's [continuous access evaluation](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-continuous-access-evaluation) lets a resource reject a token that has not expired. And [RFC 9396](https://www.rfc-editor.org/rfc/rfc9396.html) specifies `authorization_details` as structured, per-action authorization data instead of a flat scope string — check your provider before designing around it, because support is thin.
 
-Here is the decision from the example, which is the matrix compiled into four ordered checks:
+Here is the decision from the example, which is the matrix compiled into four ordered checks — the first two of them, since the other two are revocation and the reason string:
 
 ```python
 def decide(call: Call) -> Decision:
@@ -260,30 +262,43 @@ The test: **can you stop one agent, for one user, against one resource, right no
 - *One resource* fails almost always, because tokens carry scopes and scopes name classes.
 - *Right now* fails whenever the answer is "at the next token expiry".
 
-Work through what the protocols actually give you. [RFC 7009 section 2.1](https://www.rfc-editor.org/rfc/rfc7009#section-2.1) revocation ends a grant — that is agent-and-user granularity, with no resource axis at all, and the RFC itself notes "there could be a propagation delay, for example, in which some servers know about the invalidation while others do not." Tokens produced by an exchange are not cascaded either: [RFC 8693 section 2.1](https://www.rfc-editor.org/rfc/rfc8693#section-2.1) states that, absent one-time-use or other semantics specific to the token type, performing an exchange has no impact on the validity of the subject token, and nothing binds the issued token's lifetime to it — so a downstream token minted five minutes ago outlives the revocation of the token it came from, which is why [OAuth flows](/govern/oauth-flows/) argues for measuring exchanged-token lifetimes in minutes. Provider-level tools are blunter still: Microsoft's [documented way](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-continuous-access-evaluation) to apply a policy or group-membership change to one user immediately is `Revoke-MgUserSignInSession`, which revokes all of that user's refresh tokens — every agent and every application at once.
+Work through what the protocols actually give you. [RFC 7009 section 2.1](https://www.rfc-editor.org/rfc/rfc7009#section-2.1) revocation ends a grant — that is agent-and-user granularity, with no resource axis at all, and the RFC itself notes "there could be a propagation delay, for example, in which some servers know about the invalidation while others do not." Tokens produced by an exchange are not cascaded either: [RFC 8693 section 2.1](https://www.rfc-editor.org/rfc/rfc8693#section-2.1) states that, absent one-time-use or other semantics specific to the token type, performing an exchange has no impact on the validity of the subject token, and that while the issued token's expiry may be influenced by the input token's, no renewal of the subject token propagates to it — so a downstream token minted five minutes ago outlives the revocation of the token it came from, which is why [OAuth flows](/govern/oauth-flows/) argues for measuring exchanged-token lifetimes in minutes. Provider-level tools are blunter still: [a documented way](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-continuous-access-evaluation) to apply a policy or group-membership change to one user immediately is Microsoft's `Revoke-MgUserSignInSession`, which revokes all of that user's refresh tokens — every agent and every application at once.
 
 So per-resource, immediate revocation is not a thing the protocols hand you. It exists only if a decision point is consulted on every call. That is the strongest argument in this guide for call-time evaluation, and it is worth saying plainly rather than leaving as an implication: **the resource axis of revocation is a property of your decision layer, not of your tokens.**
 
-In the example, revocation is a table consulted inside `decide()`, keyed on all three parts with `None` meaning "any":
+The sharper version of that claim is about granularity. A scope names a class — `graph:drive`, `channels:history` — so the finest revocation a token can express is *this user's whole class of resource*. A decision layer can name the instance, and stopping one agent from reading one document for one person while every other document in the same class keeps working is a thing no grant, on any provider in this pillar, can say. That is the concrete difference, and it is why the revocation table below matches an entry against both the instance and its class rather than only the class: a table that compared classes alone would accept a revoke naming one document, return without error, and change nothing.
+
+In the example, revocation is a table consulted inside `decide()`, keyed on all three parts with `None` meaning "any", and a resource entry naming either one instance or a whole class:
 
 ```python
-revoke(AGENT, subject="oid:ravi", resource="graph:drive")
+revoke(AGENT, subject="oid:ravi", resource="graph:drive/runbook-payments.docx")
 ```
 
-The next call is refused, and only that cell is:
+The next call for that document is refused, and nothing else is:
+
+```text
+== after revoke(..., resource='graph:drive/runbook-payments.docx') ==
+  deny  blocked  oid:ravi   graph:drive/runbook-payments.docx      read_file     revoked: ('agent:oncall-assistant@v3', 'oid:ravi', 'graph:drive/runbook-payments.docx')
+  allow success  oid:ravi   graph:drive/runbook-search.docx        read_file     intersection of agent_grant and grant:01JQ8Z9RMK covers graph:drive:read_file
+  allow success  oid:ravi   slack:channel/C-INC-402                read_history  agent_grant covers slack:channel:read_history, no user data reached
+```
+
+Row two is the one to read twice. Same agent, same user, same resource class, same action, same delegation — and it is allowed, because the revocation named a document rather than a class. No scope string on any provider in this pillar can draw that line.
+
+The class form is still there, and it is the blunter of the two:
 
 ```text
 == after revoke(agent, subject='oid:ravi', resource='graph:drive') ==
   deny  blocked  oid:ravi   graph:drive/runbook-payments.docx      read_file     revoked: ('agent:oncall-assistant@v3', 'oid:ravi', 'graph:drive')
-  allow success  oid:ravi   slack:channel/C-INC-402                read_history  agent_grant covers slack:channel:read_history, no user data reached
+  deny  blocked  oid:ravi   graph:drive/runbook-search.docx        read_file     revoked: ('agent:oncall-assistant@v3', 'oid:ravi', 'graph:drive')
   allow success  -          slack:channel/C-INC-402                post_message  agent_grant covers slack:channel:post_message, no user data reached
 ```
 
-Three rows, and the second and third are the ones that make it a test rather than a kill switch: the same user against a different resource still works, and the agent's own unattended action still works. A revocation that stops more than the cell you named is an outage you will be blamed for, which is why the blunt levers do not get pulled.
+Both documents go, and the agent's own unattended action survives. Pick the narrower form when you can name the instance, because a revocation that stops more than the cell you named is an outage, and an outage is how a control gets removed.
 
 Two things this does not do, and both need saying:
 
-**A deny in your decision layer does not reach a credential already issued.** If the agent holds a provider refresh token for that user, the deny stops the agent from using it and nothing stops anyone who has stolen it. So revoke in both places — the deny for immediacy, the RFC 7009 call for finality — and keep issued lifetimes short so the two converge. The three durable revocation shapes, and which one you actually have, are laid out in [credential vaulting and rotation](/govern/credentials/): delete the principal at the resource, deny at the authorizer, or rely on expiry.
+**A deny in your decision layer does not reach a credential already issued.** If the agent holds a provider refresh token for that user, the deny stops the agent from using it and nothing stops anyone who has stolen it. So revoke in both places — the deny for immediacy, the RFC 7009 call for finality — and keep issued lifetimes short so the two converge. The three durable revocation shapes, and which one you actually have, are laid out in [credential vaulting and rotation](/govern/credentials/): invalidate the credential at the source, deny at the authorizer, or expiry.
 
 **Expiry is the only mechanism that works when nobody is watching.** Scoping a credential to one user and one resource pays off only if you find out about the leak. A short lifetime bounds the exposure whether or not anyone notices, which is why it is the control to reach for first if you are only going to implement one.
 
@@ -313,6 +328,8 @@ The example emits one record per attempt, including the attempts that never beca
 Two fields carry more than their size suggests.
 
 `decision_reason` names the axis that decided. "Denied by policy" is not attribution of a decision; `agent_grant: holds no delete_file on graph:drive` tells the next reader which of the four axes to change, and tells an auditor that a specific rule was evaluated rather than that a default fired. On the allow path this matters more, not less: an allow with no reason is unfalsifiable, because you cannot distinguish a correct decision from a policy that permits everything.
+
+`grant_id` is present only where a delegation is what permitted the call. Ravi's Slack read carries a subject and `"grant_id": null`, because the agent's own grant answered and his consent was never consulted — naming a grant there would invent a link between a person's consent and a call that did not use it, which is the same bug as a decision reason naming the wrong axis, one column to the left.
 
 `principal_type` says `service` when there is no human, and the corresponding `principal_id` is explicitly null. "There was no human" and "we failed to capture the human" are different answers, and a record that cannot tell them apart converts an unattributed call into a legitimate unattended one.
 
@@ -344,7 +361,7 @@ The test for whether a retirement finished: no credential can be minted, no dele
 
 | Model | Attribution | Revocation granularity | Multi-user support | Audit quality | When it wins |
 | --- | --- | --- | --- | --- | --- |
-| Shared credential | The account, not the caller. Every agent and every human holding the key produces identical records. | The key. Revoking stops every holder at once, which is why it does not get done. | None. The credential's authority must be the union of every user's, and the per-user boundary moves into your query code. | Records exist and prove nothing. You can show that the account acted, never who for. | One agent, one resource, no user axis, and every operator may already read all of it. Honest there, and nowhere else. |
+| Shared credential | The account, not the caller. Every agent and every human holding the key produces identical records. | The key, and nothing smaller. Revoking is an outage for every other holder. | None. The credential's authority must be the union of every user's, and the per-user boundary moves into your query code. | Records exist and prove nothing. You can show that the account acted, never who for. | One agent, one resource, no user axis, and every operator may already read all of it. Honest there, and nowhere else. |
 | Per-agent identity | The agent, correctly and specifically. Two agents are two principals. | Per agent. You can stop this one without touching the others, but not for one user or one resource. | Still none. Every caller reaches the agent's ceiling, so the intern reaches whatever the agent can reach. | Good on the agent axis, blank on the user axis. Answers "what did it do", never "for whom". | Genuinely unattended work over data with no per-user access model: reconciliation, archival, the agent's own housekeeping. |
 | Per-agent identity with delegation | Both principals in one record, keyed on an immutable subject id, with the grant that permitted it. | All three axes, if the decision is consulted per call: this agent, for this user, against this resource. | Native. The effective permission is the intersection of the agent's grant and the caller's, computed per request. | Complete, and complete is the only useful state — the four clauses are a conjunction. | Any agent with named humans in front of it, which is most of them. The default. |
 
@@ -488,4 +505,4 @@ Primary sources for everything asserted above:
 - [Overview of permissions and consent in the Microsoft identity platform](https://learn.microsoft.com/en-us/entra/identity-platform/permissions-consent-overview) — delegated versus application permissions, which is the agent-as-delegate and agent-as-principal split in one vendor's vocabulary.
 - [Slack OAuth scopes reference](https://docs.slack.dev/reference/scopes) — `channels:history`, `chat:write`, and `chat:write.public`, including the channel-membership wording that makes membership half the grant.
 - [GitHub Apps REST API](https://docs.github.com/en/rest/apps/apps) — installation access tokens and the `repositories` and `permissions` parameters that narrow one at mint time.
-- [NIST SP 800-53 Rev. 5](https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final) — AU-3 on the content of an audit record, including the "identity of any individuals, subjects, or objects/entities associated with the event" — the clause an agent strains, because there are two identities and the interesting one is not the one making the call.
+- [NIST SP 800-53 Rev. 5](https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-53r5.pdf) — control AU-3, Content of Audit Records, including the "identity of any individuals, subjects, or objects/entities associated with the event" — the clause an agent strains, because there are two identities and the interesting one is not the one making the call.

@@ -96,7 +96,13 @@ def _revocation_matching(call: Call) -> tuple[str, str | None, str | None] | Non
             continue
         if subject is not None and subject != call.subject:
             continue
-        if resource is not None and resource != _resource_class(call.resource):
+        # A revocation names either a resource class or one instance, and both
+        # forms have to match here. Comparing only the class would silently
+        # accept an instance-level revoke and change nothing -- a revocation
+        # that reports success while doing nothing, which is the shape the
+        # credentials guide warns about. Instance granularity is also the
+        # reason this table exists at all: no scope string can express it.
+        if resource is not None and resource not in (call.resource, _resource_class(call.resource)):
             continue
         return entry
     return None
@@ -144,6 +150,10 @@ def decide(call: Call) -> Decision:
             return Decision(False, f"delegation_expired: {delegation['grant_id']} expired")
 
         # 3. The intersection, never the union. Missing from either side denies.
+        #    These verbs are flat, so a membership test is the intersection. If
+        #    yours are hierarchical scope strings -- Files.ReadWrite implying
+        #    Files.Read -- expand both sets under the implication table first,
+        #    or the naive intersection is empty when the answer is not.
         if cell not in delegation["granted"]:
             return Decision(False, f"not_delegated: {delegation['grant_id']} does not cover {cell[1]}")
 
@@ -209,7 +219,13 @@ def execute(call: Call) -> dict[str, object]:
     else:
         outcome, detail = "blocked", None
 
-    delegation = DELEGATIONS.get((call.agent, call.subject)) if call.subject else None
+    # Name a grant only where the delegation is what permitted the call. A
+    # subject on an agent-authority row does not make that row delegated, and a
+    # grant_id there would manufacture a link between a user's consent and a
+    # call it had nothing to do with.
+    delegation = None
+    if call.subject is not None and _resource_class(call.resource) in USER_SCOPED:
+        delegation = DELEGATIONS.get((call.agent, call.subject))
 
     return {
         "occurred_at": NOW.isoformat(),
@@ -230,7 +246,7 @@ def execute(call: Call) -> dict[str, object]:
 
 
 # --------------------------------------------------------------------------
-# The same four requests, with no agent identity and no subject.
+# The same seven requests, with no agent identity and no subject.
 # --------------------------------------------------------------------------
 
 
@@ -261,6 +277,14 @@ REQUESTS = [
 ]
 
 
+# A second document in the same resource class. Without one, an instance-level
+# revocation and a class-level one produce identical output and neither is
+# distinguishable from the other.
+OTHER_DOC = Call(
+    AGENT, "oid:ravi", "graph:drive/runbook-search.docx", "read_file", TASK, {"path": "/runbooks"}
+)
+
+
 def show(label: str, records: list[dict[str, object]]) -> None:
     print(f"\n== {label} ==")
     for record in records:
@@ -280,17 +304,38 @@ def main() -> None:
     for verdict in verdicts:
         print(f"  {verdict}  (x{len(REQUESTS)})")
 
-    # The three-part revocation test: one agent, one user, one resource, now.
+    # The three-part test at instance granularity: one agent, one user, one
+    # document. This is the resource axis no scope string can express, because
+    # a scope names the class and this names the file.
+    revoke(AGENT, subject="oid:ravi", resource="graph:drive/runbook-payments.docx")
+    show(
+        "after revoke(..., resource='graph:drive/runbook-payments.docx')",
+        [
+            execute(REQUESTS[1]),  # Ravi on that document -- the revoked cell
+            execute(OTHER_DOC),    # Ravi on another document in the same class
+            execute(REQUESTS[0]),  # Ravi's Slack read -- a different resource
+        ],
+    )
+
+    # The class form is the blunter of the two, and still works: it takes the
+    # whole resource class for that user, including documents nobody named.
+    REVOKED.clear()
     revoke(AGENT, subject="oid:ravi", resource="graph:drive")
     after = [
-        execute(REQUESTS[1]),  # Ravi's runbook read -- the cell that was revoked
-        execute(REQUESTS[0]),  # Ravi's Slack read -- a different resource
+        execute(REQUESTS[1]),  # Ravi's runbook read -- inside the revoked class
+        execute(OTHER_DOC),    # another document in the same class -- also gone
         execute(REQUESTS[4]),  # the agent's own post -- a different subject
     ]
     show("after revoke(agent, subject='oid:ravi', resource='graph:drive')", after)
 
     print("\n== the record for the denial ==")
     print(json.dumps(after[0], indent=2, sort_keys=True))
+
+    # An agent-authority row carries no grant_id, because no delegation
+    # permitted it. A grant named here would be a false link between a user's
+    # consent and a call that never consulted it.
+    print("\n== the record for an agent-authority call ==")
+    print(json.dumps(execute(REQUESTS[0]), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
