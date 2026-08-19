@@ -499,7 +499,7 @@ The honest comparison is that the middle row is where most teams should be, and 
 
 **Cause:** scope, or classification. Scope is the multiplication from step 4 — a breaker held in process memory never sees enough of the fleet's failures to trip. Classification is the other half: counting a `400` or `401` as a dependency failure opens the breaker on a bug in the agent's own request building, which then presents as an outage nobody can find.
 
-**Fix:** one breaker per (dependency, credential), shared across the pool. Trip only on transport errors, `408`, `429`, and `5xx`, and assert that in a test — the self-check in `guardrails.py` asserts that a 400 and a 401 do not count. Export the state as a metric so "the breaker is open" is something you can see rather than infer.
+**Fix:** one breaker per (dependency, credential), shared across the pool. Trip only on transport errors, `408`, `429`, `500`, `502`, `503`, and `504` — not `5xx` as a class — and assert that in a test — the self-check in `guardrails.py` asserts that a 400 and a 401 do not count. Export the state as a metric so "the breaker is open" is something you can see rather than infer.
 
 ### Pagination that runs forever
 

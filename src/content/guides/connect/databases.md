@@ -317,7 +317,7 @@ $ python3 query_tools.py 2
 
 The `placed_at` values come from `now()` when the example data was seeded, so yours will differ; nothing else in that output does.
 
-`examples/connect-databases/prove_rls.sql` runs the same proof in `psql`, including the case that matters most: with no identity set, `SELECT count(*) FROM public.orders` returns `0`. Run that assertion in CI — `examples/connect-databases/checks.sql` is that file, seven assertions that exit 0 together and exit 3 on the first regression. A regression here is silent — nothing errors, the agent just starts seeing more — and a test that only checks "user 1 sees their own rows" passes just as happily when user 1 sees everyone's. Run `checks.sql` as the agent's own role, never as a superuser, or every behavioural assertion in it passes vacuously.
+`examples/connect-databases/prove_rls.sql` runs the same proof in `psql`, including the case that matters most: with no identity set, `SELECT count(*) FROM public.orders` returns `0`. Run that assertion in CI — `examples/connect-databases/checks.sql` is that file, eight assertions that exit 0 together and exit 3 on the first regression. A regression here is silent — nothing errors, the agent just starts seeing more — and a test that only checks "user 1 sees their own rows" passes just as happily when user 1 sees everyone's. Run `checks.sql` as the agent's own role, never as a superuser, or every behavioural assertion in it passes vacuously.
 
 Note what the summary above comes from. `order_summary` is a view, and views are where per-user access quietly dies:
 

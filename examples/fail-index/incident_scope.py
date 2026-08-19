@@ -20,7 +20,7 @@ leaves no row here, which is why the provider's own log is the second source.
 
 The action vocabulary is yours. `WRITE_ACTIONS` and `READ_ACTIONS` below are
 this file's defaults, and a verb in neither is reported as unclassified rather
-than assumed to be a read - see the third demo block. Edit both sets to match
+than assumed to be a read - see the second demo block. Edit both sets to match
 your own schema before you put a count from this file in a report.
 """
 

@@ -63,9 +63,10 @@ REPORTS_TOKEN_ACTIVITY_URL = (
     "https://admin.googleapis.com/admin/reports/v1/activity/users/{user}/applications/token"
 )
 
-# Retention on OAuth log events is 6 months and the documented lag is "up to a
-# few hours". Excluding the most recent day stops a scope being scored as
-# unexercised only because its call has not landed in the log yet.
+# Retention on OAuth Token log events data is 6 months and the documented lag on
+# the Token log events row is "a couple of hours" -- not the "up to a few hours"
+# on the separate OAuth row. Excluding the most recent day stops a scope being
+# scored as unexercised only because its call has not landed in the log yet.
 MAX_WINDOW_DAYS = 180
 LAG_EXCLUSION_DAYS = 1
 
