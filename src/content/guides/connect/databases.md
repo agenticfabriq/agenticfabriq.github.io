@@ -177,7 +177,7 @@ The only way to write the first form is to build the string yourself, which mean
 
 A prefixed name with a dot — `app.acting_user_id`, not `acting_user_id`. A name with no prefix is looked up as a built-in parameter, so `SET acting_user_id = '1'` fails with `unrecognized configuration parameter "acting_user_id"`.
 
-The identity you put here has to come from your own authenticated session, not from anything the model produced. That is the [delegated identity](/govern/) problem: the agent is acting for a user, the database needs to know which one, and the answer must travel from the request that started the run rather than from a field the agent filled in. An agent that chooses its own `acting_user_id` has authentication in name only.
+The identity you put here has to come from your own authenticated session, not from anything the model produced. That is the [delegated identity](/govern/delegated-identity/) problem: the agent is acting for a user, the database needs to know which one, and the answer must travel from the request that started the run rather than from a field the agent filled in. An agent that chooses its own `acting_user_id` has authentication in name only.
 
 ### 6. Enable and force row-level security
 
