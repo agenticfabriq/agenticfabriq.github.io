@@ -114,9 +114,9 @@ const contributing = `${REPO_URL}/blob/main/CONTRIBUTING.md`;
       <code>YYYY-MM-DD</code> string.
     </li>
     <li>
-      <strong>An internal link that does not resolve.</strong> Every relative link on every
-      built page is checked against the routes the build actually generated, not against a list
-      someone maintains by hand.
+      <strong>An internal link that does not resolve.</strong> Every relative link to a page on
+      every built page — an asset like <code>/rss.xml</code> is not one — is checked against the
+      routes the build actually generated, not against a list someone maintains by hand.
     </li>
     <li>
       <strong>A page nothing links to.</strong> An orphan fails, and so does any page carrying
@@ -124,11 +124,17 @@ const contributing = `${REPO_URL}/blob/main/CONTRIBUTING.md`;
     </li>
     <li>
       <strong>A code sample that has drifted.</strong> Every Python file under
-      <code>examples/</code> is compiled and then imported in its own subprocess, which catches
-      a sample calling a name a sibling file stopped exporting. Third-party imports are limited
-      to a declared allowlist, so a sample cannot depend on a package nobody agreed to, and
-      anything touching the Agentic Fabriq SDK is checked against the published surface, so it
-      cannot call a method that does not exist.
+      <code>examples/</code> is compiled, and every one whose imports resolve is then imported in
+      its own subprocess, which catches a sample calling a name a sibling file stopped exporting.
+      CI installs the samples' declared dependencies so the coupled ones are covered rather than
+      passed over. What still cannot be imported is skipped by name with a reason, and the skips
+      are counted in the run output — today that is the samples using the published Agentic
+      Fabriq SDK, which does not yet expose the modules they import, plus two standalone scripts
+      that read a credential at module scope. So coverage is a number you can read rather than
+      one you assume. Every import in every sample is also read statically and checked against a
+      declared allowlist, so a sample cannot depend on a package nobody agreed to, and anything
+      touching the Agentic Fabriq SDK is checked against the published surface, so it cannot call
+      a method that does not exist.
     </li>
     <li>
       <strong>An SEO invariant broken on any built page.</strong> The suite parses every
