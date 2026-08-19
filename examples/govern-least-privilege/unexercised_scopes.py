@@ -31,6 +31,10 @@ Two honest caveats, both of which apply to any implementation of this metric:
    attempt is not proof the call succeeded, and AWS documents the same
    limitation for its last-accessed data. Treat a low-count scope as a
    question, not an answer.
+3. Thirty days is a review cadence, not an evidence window. A scope exercised
+   once a quarter is indistinguishable from a dead one inside it, so before
+   deleting on a zero, re-run over a window that contains one of every periodic
+   thing the agent does -- a month-end close, a quarterly report.
 """
 
 from __future__ import annotations

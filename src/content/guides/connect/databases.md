@@ -152,7 +152,7 @@ It costs you two things. Replication lag means the agent can answer a question a
 
 ### 5. Carry the acting user's identity into the session
 
-This is the step that decides whether you built a per-user reader or a universal one. The database has to know which human the agent is acting for, and the only correct mechanism is a session variable set as a bound parameter:
+This is the step that decides whether you built a per-user reader or a universal one. The database has to know which human the agent is acting for, and two mechanisms can carry that: a database role per end user, so policies read `current_user`, or a session variable set as a bound parameter. This guide uses the second, because the first means a `CREATE ROLE` per signup and a connection pool per tenant. The session-variable form:
 
 ```sql
 BEGIN READ ONLY;

@@ -69,7 +69,7 @@ Look at the graphs first, because the shape tells you which loop you have. There
 
 **3. Two agents calling each other.** Agent A treats agent B as the authority on a question and B treats A the same way. Same ramp as shape 2, same absence of errors, but the records pile up in your own agent invocation table rather than in a provider's. Synchronous in-process calls eventually die on the interpreter's stack limit, which is why this one is often first seen in a stack trace rather than on a dashboard. Across a queue or an HTTP hop there is no stack, and therefore no limit.
 
-**4. The planning loop that never converges.** The agent finishes a pass, cannot verify that it succeeded, and decides to check again. This shows up as duration rather than volume: runs that used to finish in nine seconds run until something else kills them, and the tool-call histogram grows a long right tail while the p50 does not move. The root cause is always the same — success is not expressible as a predicate a machine can evaluate — so the agent substitutes judgement, and judgement can always find another reason to look.
+**4. The planning loop that never converges.** The agent finishes a pass, cannot verify that it succeeded, and decides to check again. This shows up as duration rather than volume: runs that used to finish in nine seconds run until something else kills them, and the tool-call histogram grows a long right tail while the p50 does not move. The root cause to check first is that success is not expressible as a predicate a machine can evaluate, so the agent substitutes judgement, and judgement can always find another reason to look.
 
 **5. Pagination that never terminates.** The flattest of the five: one endpoint, one parameter set, a constant rate, forever. The cursor is misread — either never sent back, or read from the presence of a key rather than its value — so page one is fetched indefinitely, or the walk restarts from the beginning each time it reaches the end. It is the loop most likely to survive a week unnoticed, because a steady, unremarkable request rate against a list endpoint looks exactly like a healthy integration.
 
@@ -499,7 +499,7 @@ The honest comparison is that the middle row is where most teams should be, and 
 
 **Cause:** scope, or classification. Scope is the multiplication from step 4 — a breaker held in process memory never sees enough of the fleet's failures to trip. Classification is the other half: counting a `400` or `401` as a dependency failure opens the breaker on a bug in the agent's own request building, which then presents as an outage nobody can find.
 
-**Fix:** one breaker per (dependency, credential), shared across the pool. Trip only on transport errors, `408`, `429`, `500`, `502`, `503`, and `504` — not `5xx` as a class — and assert that in a test — the self-check in `guardrails.py` asserts that a 400 and a 401 do not count. Export the state as a metric so "the breaker is open" is something you can see rather than infer.
+**Fix:** one breaker per (dependency, credential), shared across the pool. Trip only on transport errors, `408`, `429`, `500`, `502`, `503`, and `504` — not `5xx` as a class, for the reason step 4 gives — and assert that in a test — the self-check in `guardrails.py` asserts that a 400 and a 401 do not count. Export the state as a metric so "the breaker is open" is something you can see rather than infer.
 
 ### Pagination that runs forever
 

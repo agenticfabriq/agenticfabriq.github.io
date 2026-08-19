@@ -52,7 +52,7 @@ faq:
 - Token exchange is the one most teams have never used and most agent systems need. An agent holding a user's token and calling a downstream service should exchange that token for one scoped to that service, not forward the original.
 - Forwarding the original hands every downstream hop the union of everything the user consented to, and makes the audit trail say the user did it. Both problems are the same mistake.
 - PKCE with `code_challenge_method=S256` belongs on every client. [RFC 9700 section 2.1.1](https://www.rfc-editor.org/rfc/rfc9700#section-2.1.1) makes it mandatory for public clients and RECOMMENDED for confidential ones, and says the advice applies to web applications too.
-- Refresh token rotation with reuse detection is the only control that tells you a refresh token was stolen. [RFC 6749 section 10.4](https://www.rfc-editor.org/rfc/rfc6749#section-10.4) describes the mechanism; [RFC 9700 section 4.14.2](https://www.rfc-editor.org/rfc/rfc9700#section-4.14.2) makes it or sender-constraining mandatory for public clients.
+- Refresh token rotation with reuse detection is the only control in ordinary OAuth that tells you a refresh token was stolen. [RFC 6749 section 10.4](https://www.rfc-editor.org/rfc/rfc6749#section-10.4) describes the mechanism; [RFC 9700 section 4.14.2](https://www.rfc-editor.org/rfc/rfc9700#section-4.14.2) makes it or sender-constraining mandatory for public clients.
 
 ## Who this is for
 
