@@ -1,17 +1,15 @@
 ---
-title: How to Give an AI Agent Access to Your Tools
-description: The four ways an agent gets access to a system — shared key, per-user OAuth, service identity, brokered — compared on attribution, blast radius, and cost.
+title: "AI Agent Access: Service Account vs Per-User OAuth"
+description: "Four ways an agent gets access to a system — shared key, per-user OAuth, service identity, brokered — compared on attribution, blast radius, and cost."
 pillar: connect
 updated: "2026-08-18"
 cornerstone: true
 keywords:
-  - ai agent tool access
-  - connect ai agent to apps
-  - agent integration guide
-  - agent access patterns
-  - per-user oauth agent
-  - agent service account
-  - brokered agent credentials
+  - "ai agent service account vs user oauth"
+  - "ai agent tool access"
+  - "agent access patterns"
+  - "oauth vs api keys for ai agents"
+  - "who does the audit log show when an agent acts"
 relatedGuides:
   - connect/gmail
   - govern/oauth-flows

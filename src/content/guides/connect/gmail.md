@@ -1,15 +1,13 @@
 ---
-title: Connecting an AI Agent to Gmail
-description: How to give an AI agent scoped, revocable access to a Gmail mailbox using OAuth, what each scope actually permits, and the failure modes to plan for.
+title: "Connect an AI Agent to Gmail: OAuth Scopes That Work"
+description: "Pick the narrowest Gmail scope, run the PKCE consent flow, refresh tokens correctly, and avoid the seven-day expiry that breaks Testing-status apps."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - ai agent gmail access
-  - gmail api oauth scopes
-  - agent email integration
-  - gmail restricted scopes
-  - domain-wide delegation
-  - gmail api quota units
+  - "ai agent gmail access"
+  - "gmail api refresh token expires 7 days"
+  - "gmail readonly vs send scope"
+  - "gmail api quota units"
 relatedGuides:
   - govern/oauth-flows
   - govern/least-privilege

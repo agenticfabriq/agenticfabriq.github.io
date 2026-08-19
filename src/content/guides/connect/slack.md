@@ -1,15 +1,14 @@
 ---
-title: Connecting an AI Agent to Slack
-description: "How to give an AI agent scoped, revocable access to a Slack workspace: bot versus user tokens, real scope names, request signature checks, and rate limits."
+title: "Slack Bot Scopes and Security for an AI Agent"
+description: "Which Slack bot scopes an agent needs, how to verify the request signature, Socket Mode versus a request URL, and the rate limits that throttle reads."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - ai agent slack integration
-  - slack bot token scopes
-  - slack app agent
-  - slack signing secret verification
-  - socket mode vs events api
-  - slack api rate limits
+  - "slack bot scopes for an ai agent"
+  - "slack conversations.history returns 15 messages"
+  - "slack signing secret verification"
+  - "slack rate limit non-marketplace app"
+  - "ai agent slack integration"
 relatedGuides:
   - connect/gmail
   - govern/delegated-identity

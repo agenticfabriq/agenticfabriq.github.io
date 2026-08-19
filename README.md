@@ -28,29 +28,29 @@ Giving an agent real access to the systems your team already uses: which permiss
 needs against this provider, how it gets one, and what the provider hands over that you
 did not ask for.
 
-- [How to Give an AI Agent Access to Your Tools](https://agenticfabriq.github.io/connect/)
-  (cornerstone) — The four ways an agent gets access to a system — shared key, per-user
-  OAuth, service identity, brokered — compared on attribution, blast radius, and cost.
-- [Connecting an AI Agent to Gmail](https://agenticfabriq.github.io/connect/gmail/) —
-  How to give an AI agent scoped, revocable access to a Gmail mailbox using OAuth, what
-  each scope actually permits, and the failure modes to plan for.
-- [Connecting an AI Agent to Slack](https://agenticfabriq.github.io/connect/slack/) —
-  How to give an AI agent scoped, revocable access to a Slack workspace: bot versus user
-  tokens, real scope names, request signature checks, and rate limits.
-- [Giving an AI Agent Access to GitHub](https://agenticfabriq.github.io/connect/github/) —
-  How to give an AI agent scoped, short-lived access to GitHub with a GitHub App
-  installation token, what each permission grants, and why a classic PAT fails.
-- [Letting an Agent Query Your Database Safely](https://agenticfabriq.github.io/connect/databases/)
-  — Give an AI agent scoped PostgreSQL access with a dedicated role, row-level security
-  keyed to the acting user, statement timeouts, and tools instead of raw SQL.
-- [Agent Access to Google Drive and Notion](https://agenticfabriq.github.io/connect/drive-and-notion/)
-  — How to connect an AI agent to Google Drive and Notion: which Drive scope to pick, how
-  Notion sharing is inherited by child pages, and what breaks first.
-- [Building and Securing MCP Servers for Agents](https://agenticfabriq.github.io/connect/mcp-servers/)
-  — How to secure an MCP server: what spec revision 2026-07-28 changed, where
-  authentication really sits, per-tool authorization, and the confused deputy problem.
-- [Tool Integration in LangChain, CrewAI, and OpenAI Agents](https://agenticfabriq.github.io/connect/frameworks/)
-  — One tool built three times, in LangChain, CrewAI, and the OpenAI Agents SDK, with the
+- [AI Agent Access: Service Account vs Per-User OAuth](https://agenticfabriq.github.io/connect/) (cornerstone)
+  — Four ways an agent gets access to a system — shared key, per-user OAuth, service
+  identity, brokered — compared on attribution, blast radius, and cost.
+- [Connect an AI Agent to Gmail: OAuth Scopes That Work](https://agenticfabriq.github.io/connect/gmail/)
+  — Pick the narrowest Gmail scope, run the PKCE consent flow, refresh tokens correctly, and
+  avoid the seven-day expiry that breaks Testing-status apps.
+- [Slack Bot Scopes and Security for an AI Agent](https://agenticfabriq.github.io/connect/slack/)
+  — Which Slack bot scopes an agent needs, how to verify the request signature, Socket Mode
+  versus a request URL, and the rate limits that throttle reads.
+- [Give an AI Agent GitHub Access with a GitHub App](https://agenticfabriq.github.io/connect/github/)
+  — Use a GitHub App installation token instead of a PAT: sign the JWT, scope it to named
+  repositories, open a pull request, and revoke it when the run ends.
+- [Give an AI Agent Safe Access to Your Postgres Database](https://agenticfabriq.github.io/connect/databases/)
+  — Give an agent a dedicated Postgres role, row-level security keyed to the acting user,
+  statement timeouts, and parameterized tools instead of raw SQL.
+- [AI Agent Access to Google Drive and Notion: Scopes First](https://agenticfabriq.github.io/connect/drive-and-notion/)
+  — Pick drive.file over the restricted Drive scopes, put the Picker in the grant loop, and
+  understand why one Notion share hands over a whole page subtree.
+- [Securing an MCP Server on the 2026-07-28 Spec](https://agenticfabriq.github.io/connect/mcp-servers/)
+  — What the 2026-07-28 revision changed, where authentication really sits, how to authorize
+  per tool and per argument, and the confused deputy problem.
+- [Per-User Credentials in LangChain, CrewAI, Agents SDK](https://agenticfabriq.github.io/connect/frameworks/)
+  — One tool built three times in LangChain, CrewAI, and the OpenAI Agents SDK, with the
   per-user credential resolved at call time rather than at import.
 
 ## Govern

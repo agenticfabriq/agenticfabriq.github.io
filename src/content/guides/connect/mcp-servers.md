@@ -1,15 +1,14 @@
 ---
-title: Building and Securing MCP Servers for Agents
-description: "How to secure an MCP server: what spec revision 2026-07-28 changed, where authentication really sits, per-tool authorization, and the confused deputy problem."
+title: "Securing an MCP Server on the 2026-07-28 Spec"
+description: "What the 2026-07-28 revision changed, where authentication really sits, how to authorize per tool and per argument, and the confused deputy problem."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - mcp server authentication
-  - model context protocol security
-  - mcp tool authorization
-  - mcp stdio transport
-  - streamable http transport
-  - confused deputy agent
+  - "mcp 2026-07-28 spec security"
+  - "mcp tool authorization per user"
+  - "mcp confused deputy"
+  - "mcp server/discover"
+  - "mcp server authentication"
 relatedGuides:
   - connect/frameworks
   - govern/oauth-flows

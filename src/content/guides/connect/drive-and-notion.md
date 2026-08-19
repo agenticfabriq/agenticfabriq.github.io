@@ -1,15 +1,13 @@
 ---
-title: Agent Access to Google Drive and Notion
-description: "How to connect an AI agent to Google Drive and Notion: which Drive scope to pick, how Notion sharing is inherited by child pages, and what breaks first."
+title: "AI Agent Access to Google Drive and Notion: Scopes First"
+description: "Pick drive.file over the restricted Drive scopes, put the Picker in the grant loop, and understand why one Notion share hands over a whole page subtree."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - ai agent google drive access
-  - notion api integration permissions
-  - drive.file scope
-  - notion integration capabilities
-  - google picker api
-  - agent document access
+  - "drive.file scope vs drive.readonly"
+  - "notion api 404 object_not_found"
+  - "ai agent google drive access"
+  - "notion integration capabilities"
 relatedGuides:
   - connect/gmail
   - govern/least-privilege

@@ -1,15 +1,13 @@
 ---
-title: Tool Integration in LangChain, CrewAI, and OpenAI Agents
-description: One tool built three times, in LangChain, CrewAI, and the OpenAI Agents SDK, with the per-user credential resolved at call time rather than at import.
+title: "Per-User Credentials in LangChain, CrewAI, Agents SDK"
+description: "One tool built three times in LangChain, CrewAI, and the OpenAI Agents SDK, with the per-user credential resolved at call time rather than at import."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - langchain tool integration
-  - crewai tools
-  - openai agents sdk tools
-  - per-user agent credentials
-  - agent tool error handling
-  - agent framework comparison
+  - "per-user api key in a langchain tool"
+  - "crewai tool called multiple times"
+  - "openai agents sdk failure_error_function"
+  - "crewai per-user credentials"
 relatedGuides:
   - connect/mcp-servers
   - govern/credentials

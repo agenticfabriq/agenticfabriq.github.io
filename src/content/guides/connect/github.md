@@ -1,15 +1,13 @@
 ---
-title: Giving an AI Agent Access to GitHub
-description: How to give an AI agent scoped, short-lived access to GitHub with a GitHub App installation token, what each permission grants, and why a classic PAT fails.
+title: "Give an AI Agent GitHub Access with a GitHub App"
+description: "Use a GitHub App installation token instead of a PAT: sign the JWT, scope it to named repositories, open a pull request, and revoke it when the run ends."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - ai agent github access
-  - github app vs pat
-  - fine grained personal access token
-  - github app installation token
-  - github app permissions
-  - github api rate limits
+  - "ai agent github access"
+  - "github app installation token for agent"
+  - "github app permissions to open a pull request"
+  - "resource not accessible by integration"
 relatedGuides:
   - connect/slack
   - govern/credentials

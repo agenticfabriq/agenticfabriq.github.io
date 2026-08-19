@@ -1,15 +1,13 @@
 ---
-title: Letting an Agent Query Your Database Safely
-description: Give an AI agent scoped PostgreSQL access with a dedicated role, row-level security keyed to the acting user, statement timeouts, and tools instead of raw SQL.
+title: "Give an AI Agent Safe Access to Your Postgres Database"
+description: "Give an agent a dedicated Postgres role, row-level security keyed to the acting user, statement timeouts, and parameterized tools instead of raw SQL."
 pillar: connect
 updated: "2026-08-18"
 keywords:
-  - ai agent database access
-  - llm sql injection
-  - row level security agent
-  - text to sql risk
-  - postgres statement timeout
-  - agent least privilege database
+  - "give an ai agent safe access to production database"
+  - "postgres row level security for ai agent"
+  - "text to sql prompt injection"
+  - "read only database user not enough for llm"
 relatedGuides:
   - connect/github
   - govern/least-privilege
