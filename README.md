@@ -64,9 +64,9 @@ everywhere, rather than re-arguing them per provider.
 
 <!-- BEGIN GENERATED govern: edit src/content/guides/, then run `npm run readme` -->
 
-- [AI Agent Identity and Permissions: Not a Service Account](https://agenticfabriq.github.io/govern/) (cornerstone)
-  — Why an AI agent is neither a user nor a service account, how to model agent, user,
-  resource and action as a matrix, and how to test revocation.
+- [AI Agent Identity and Permissions: The Four-Axis Model](https://agenticfabriq.github.io/govern/) (cornerstone)
+  — An AI agent is its own kind of principal. Model it as agent, user, resource and action,
+  decide at call time, and prove revocation works one cell at a time.
 - [AI Agent Audit Log: Schema, Immutability, Retention](https://agenticfabriq.github.io/govern/audit/)
   — What belongs in an AI agent audit log, field by field: both principals, the policy
   decision, an append-only store, redaction, and how long to keep it.
