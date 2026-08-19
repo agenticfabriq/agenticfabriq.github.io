@@ -233,18 +233,29 @@ AS $fn$
 DECLARE
     current_head bytea;
     current_seq  bigint;
-    found        boolean;
 BEGIN
     -- Deliberately does NOT create the chain. Creation happens in next_link and
     -- nowhere else, so there is exactly one path by which this table grows, and
     -- a writer that skips next_link fails here instead of quietly opening a
     -- chain whose head it never locked.
-    SELECT true, h.head_hash, h.seq INTO found, current_head, current_seq
+    SELECT h.head_hash, h.seq INTO current_head, current_seq
       FROM audit.chain_head h
      WHERE h.chain_id = NEW.chain_id AND h.owner = session_user
        FOR UPDATE;
 
-    IF NOT found THEN
+    -- FOUND is plpgsql's built-in, set by the SELECT INTO above. Do NOT declare
+    -- a variable of your own to stand in for it. An earlier version of this
+    -- function did exactly that -- `SELECT true, ... INTO found, ...` -- which
+    -- looks equivalent and is not: SELECT INTO leaves every target NULL when no
+    -- row matches, so `found` became NULL rather than false, `IF NOT found`
+    -- evaluated to NULL, and the branch never ran. The guard was dead code.
+    --
+    -- The consequence was not a missing error message. With no row found,
+    -- current_head was NULL, so the fork check below (IS DISTINCT FROM NULL)
+    -- also passed, and a writer who owned nothing could append to another
+    -- writer's chain and overwrite its head. A guard that fails open takes the
+    -- checks behind it with it.
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'chain % does not exist or is not owned by % -- call audit.next_link first',
             NEW.chain_id, session_user
             USING ERRCODE = 'insufficient_privilege';
@@ -264,10 +275,14 @@ BEGIN
             USING ERRCODE = 'serialization_failure';
     END IF;
 
+    -- Scoped by owner as well as chain_id. The SELECT above already refused a
+    -- chain this caller does not own, so this predicate is redundant on the
+    -- happy path -- and that is the point: it means a future edit that weakens
+    -- the guard cannot silently turn this into a write across ownership.
     UPDATE audit.chain_head
        SET head_hash = NEW.record_hash,
            seq       = NEW.chain_seq
-     WHERE chain_id = NEW.chain_id;
+     WHERE chain_id = NEW.chain_id AND owner = session_user;
 
     RETURN NEW;
 END;
@@ -313,6 +328,12 @@ GRANT INSERT (
 --   SELECT proname, proacl FROM pg_proc WHERE proname = 'next_link';
 REVOKE EXECUTE ON FUNCTION audit.next_link(text) FROM PUBLIC;
 GRANT  EXECUTE ON FUNCTION audit.next_link(text) TO agent_writer;
+
+-- link_record() is a trigger function, so a direct call errors out on its own.
+-- Revoke it from PUBLIC anyway: "it is not callable in a useful way" is a fact
+-- about today's code, not a privilege boundary, and a rule you apply to every
+-- SECURITY DEFINER function is one you can actually audit for.
+REVOKE EXECUTE ON FUNCTION audit.link_record() FROM PUBLIC;
 
 GRANT SELECT ON audit.agent_action TO auditor;
 GRANT SELECT ON audit.chain_head   TO auditor;

@@ -311,11 +311,16 @@ Without the `REVOKE`, the `GRANT` is decorative — PostgreSQL grants `EXECUTE` 
 ERROR:  permission denied for function next_link
 ```
 
-Scope the parameter too. `p_chain_id` is caller-supplied, so a function that locks and reads whatever chain it is handed lets one writer read another's head and stall it by holding its row lock. The schema records an `owner` on each chain — `session_user`, because `current_user` inside a definer function is the function's owner — and refuses anything else:
+Scope the parameter too. `p_chain_id` is caller-supplied, so a function that locks and reads whatever chain it is handed lets one writer read another's head and stall it by holding its row lock. The schema records an `owner` on each chain — `session_user`, because `current_user` inside a definer function is the function's owner — and refuses anything else, on the `INSERT` path as well as on `next_link`:
 
 ```text
 ERROR:  chain chain:emitter-1 is not owned by other_svc
+ERROR:  chain chain:conc does not exist or is not owned by other_svc -- call audit.next_link first
 ```
+
+Test both paths, not one. The first version of that ownership guard was written as `SELECT true, ... INTO found, ...` and then `IF NOT found`. `SELECT INTO` leaves its targets NULL when no row matches, so `found` was NULL rather than false, `IF NOT found` evaluated to NULL, and the branch never ran — and because `current_head` was NULL too, the fork check behind it (`IS DISTINCT FROM NULL`) also passed. A writer who owned nothing could append to someone else's chain and overwrite its head, while the legitimate owner was still correctly bound by the fork check. Use plpgsql's built-in `FOUND` and do not declare a variable that shadows it. A guard that fails open takes every check behind it along.
+
+**Ownership has a running cost, and it is the kind that hides.** `owner` stores a role *name*, captured once. Rotate the writer's login to a new role with identical privileges and every append is refused from then on; rename the role and the same thing happens, because the stored name no longer matches. The writer cannot repair this itself — it holds no `UPDATE` on `chain_head`, by design — so a schema owner has to reassign the chain. Failing closed is the right direction for an audit store, but be clear about what the failure looks like from the outside: an emitter that treats audit writes as best-effort will drop records quietly rather than page anyone. If you adopt chain ownership, alert on append failures specifically, and put "reassign the chains" in the same runbook as "rotate the service credential" — the two are now coupled whether or not you wrote that down.
 
 The lock does what locks do. Two writers on one chain, the first sleeping 1.5 seconds before committing:
 
@@ -481,8 +486,10 @@ The honest summary: the first column is not a real option, and the choice betwee
 - [ ] The writer's `INSERT` is granted column by column and omits `recorded_at`; an insert naming it fails with `permission denied`.
 - [ ] The service account running agents cannot `UPDATE`, `DELETE`, or `TRUNCATE` the audit table — confirmed against `pg_class.relacl`, not against a `REVOKE` statement that may be a no-op.
 - [ ] The exact bytes that were hashed are stored, and the verifier reads those bytes rather than re-deriving them from typed columns.
-- [ ] The verifier cross-checks **every** column against those bytes, not a convenient subset of the plain-text ones — confirmed by editing a column it does not obviously cover, such as `decision_reason` or `occurred_at`, and watching it fail.
-- [ ] Any `SECURITY DEFINER` function has `EXECUTE` revoked from `PUBLIC`; verified with `SELECT proname, proacl FROM pg_proc`, since PostgreSQL grants it to `PUBLIC` on creation and a later `GRANT` to your writer changes nothing.
+- [ ] The verifier cross-checks **every column the exporter ships** against those bytes, not a convenient subset of the plain-text ones — confirmed by editing a column it does not obviously cover, such as `decision_reason` or `occurred_at`, and watching it fail. A column in the table but missing from the exporter is unchecked and nothing will tell you.
+- [ ] **Every** `SECURITY DEFINER` function has `EXECUTE` revoked from `PUBLIC` — all of them, including trigger functions that are not usefully callable today; verified with `SELECT proname, proacl FROM pg_proc`, since PostgreSQL grants it to `PUBLIC` on creation and a later `GRANT` to your writer changes nothing.
+- [ ] Each guard in a definer function has been tested by an operation that should trip it, run as the identity that should be refused — not merely read. A guard written with `SELECT ... INTO found` instead of plpgsql's built-in `FOUND` is dead code that looks correct.
+- [ ] You know what happens to the audit path when the writer's login credential rotates, and it is not "writes stop silently".
 - [ ] The chain is verified against an export from the **store**, not only against the emitter's stdout — those are different code paths and only one of them is what you will have during an incident.
 - [ ] Writers on a single chain are serialised, or each emitter owns a chain and each chain's head is anchored separately.
 - [ ] The hash chain is verified on a schedule, and the head hash is anchored somewhere the store's operator does not control.
