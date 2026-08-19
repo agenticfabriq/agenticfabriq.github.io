@@ -17,15 +17,29 @@
 -- as the emitter hashed it, and NOT reconstructed from the typed columns. That
 -- reconstruction is the obvious thing to write and it does not work:
 -- PostgreSQL renders `timestamptz` with trailing zeros stripped, so a record
--- emitted at ...:41.979180+00:00 comes back as ...:41.97918+00:00, rehashes to
--- a different value, and the verifier reports tampering on roughly one record
--- in ten. An integrity control that cries wolf gets switched off, and then you
--- have neither the control nor the alert.
+-- emitted at ...:41.979183+00:00 comes back as ...:41.979183+00 -- a space
+-- instead of the T, a two-digit offset instead of +00:00, and trailing zeros
+-- stripped on top of that. Re-derivation therefore fails on EVERY record, not
+-- on some unlucky tenth of them, and the verifier reports tampering against a
+-- healthy store forever. An integrity control that cries wolf gets switched
+-- off, and then you have neither the control nor the alert.
 --
 -- The `columns` object is the cross-check: it carries the queryable columns so
 -- the verifier can confirm they still agree with the bytes that were hashed.
 -- Editing a column an investigator reads, while leaving canonical_form alone,
 -- is otherwise a silent change.
+--
+-- Every column that appears in canonical_form is listed below, re-rendered into
+-- the spelling the emitter used -- occurred_at through to_char, bytea through
+-- encode, enums cast to text -- so the verifier compares like with like rather
+-- than skipping the awkward types. A partial cross-check invites exactly the
+-- claim this guide warns against: saying a control covers what an investigator
+-- reads when it covers nine columns of twenty-six.
+--
+-- One column is necessarily absent: recorded_at. The emitter never sees it, so
+-- it is not in canonical_form and cannot be cross-checked against it. That is
+-- the point of recorded_at -- it is the store's word, not the emitter's -- and
+-- it is why the writer has no INSERT privilege on it.
 
 SET ROLE auditor;
 
@@ -33,15 +47,34 @@ SELECT jsonb_build_object(
            'canonical_form', canonical_form,
            'record_hash',    encode(record_hash, 'hex'),
            'columns', jsonb_build_object(
-               'record_id',    record_id,
-               'agent_id',     agent_id,
-               'principal_id', principal_id,
-               'resource',     resource,
-               'action',       action,
-               'decision',     decision::text,
-               'outcome',      outcome::text,
-               'chain_id',     chain_id,
-               'chain_seq',    chain_seq
+               'record_id',        record_id,
+               -- Rebuild the emitter's exact spelling: RFC 3339, T separator,
+               -- six fractional digits, +00:00. `::text` gives none of those.
+               'occurred_at',      to_char(occurred_at AT TIME ZONE 'UTC',
+                                           'YYYY-MM-DD"T"HH24:MI:SS.US') || '+00:00',
+               'agent_id',         agent_id,
+               'principal_id',     principal_id,
+               'principal_type',   principal_type,
+               'grant_id',         grant_id,
+               'resource',         resource,
+               'action',           action,
+               'arguments_sha256', encode(arguments_sha256, 'hex'),
+               'arguments_shape',  arguments_shape,
+               'decision',         decision::text,
+               'decision_reason',  decision_reason,
+               'policy_version',   policy_version,
+               'outcome',          outcome::text,
+               'outcome_detail',   outcome_detail,
+               'correlation_id',   correlation_id,
+               'parent_span_id',   parent_span_id,
+               'model_id',         model_id,
+               'prompt_version',   prompt_version,
+               'tool_version',     tool_version,
+               'untrusted_input',  untrusted_input,
+               'chain_id',         chain_id,
+               'chain_seq',        chain_seq,
+               'prev_hash',        CASE WHEN prev_hash IS NULL
+                                        THEN NULL ELSE encode(prev_hash, 'hex') END
            )
        )::text
   FROM audit.agent_action
