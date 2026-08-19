@@ -72,12 +72,32 @@ SELECT resource,
 --    is stamped by this server. A large or negative skew means you cannot
 --    trust the ordering in query 1, and you should say so in the report rather
 --    than discover it during cross-examination.
+--
+--    The window is scoped on recorded_at, NOT on occurred_at, and that is the
+--    only reason this query works at all. A skew check must never be scoped by
+--    the column it audits: filter on occurred_at and a record excuses itself
+--    from the check by lying hard enough. Backdate occurred_at to 2020 and the
+--    row falls outside `occurred_at >= :from`, is never counted, and the query
+--    reports a clean store while holding the forgery -- from_the_future 0 over
+--    a store that contains one. recorded_at is the single value in the row the
+--    writer cannot supply, which is what the column-level GRANT in schema.sql
+--    buys, so it is the only sound thing to filter on.
+--
+--    The OR clause keeps rows the emitter *claims* fall in this window even
+--    though the store received them outside it, which is what a late backdated
+--    replay looks like. A row escapes both clauses only by sitting outside the
+--    window on the unforgeable column and the forgeable one at once, and the
+--    unforgeable half is not the emitter's to choose.
+--
+--    schema.sql has no index on recorded_at, so this predicate scans. That is
+--    the right trade for a periodic integrity check and the wrong one for the
+--    2am query; add an index if your store is large enough to feel it.
 SELECT agent_id,
        count(*)                                                   AS records,
        max(recorded_at - occurred_at)                              AS worst_lag,
        count(*) FILTER (WHERE occurred_at > recorded_at)           AS from_the_future
   FROM audit.agent_action
- WHERE occurred_at >= :from::timestamptz
-   AND occurred_at  < :to::timestamptz
+ WHERE (recorded_at >= :from::timestamptz AND recorded_at < :to::timestamptz)
+    OR (occurred_at >= :from::timestamptz AND occurred_at < :to::timestamptz)
  GROUP BY agent_id
  ORDER BY worst_lag DESC;

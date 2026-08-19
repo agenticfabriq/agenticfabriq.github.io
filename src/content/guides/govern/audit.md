@@ -434,6 +434,8 @@ Real output from the run described above, abbreviated to the columns that carry 
 
 Two rows, and the second one is the whole reason the trail exists. It answers the fourth clause with evidence rather than assertion: yes, a control was evaluated, and here is the rule that fired.
 
+One gap in that query is worth naming rather than leaving for you to hit. `principal_id = :principal` is an equality, and step 2 made `principal_id` nullable on purpose so that a scheduled job records "there was no human" instead of the string `"system"`. No value of `:principal` matches NULL, so this query — and the summary below it — cannot reach the unattended rows at all, and they return an empty result rather than an error. That is a real gap, not a design: the schema makes "no delegated human" a first-class answer and then the investigation has no way to ask for it. To investigate those actions, substitute `AND principal_id IS NULL` for the equality and drop the `:principal` variable. Do not reach for `IS NOT DISTINCT FROM` to cover both cases in one query — an investigation should say which population it is about, and a single query that silently switches between "this user's actions" and "every unattended action" is one somebody will misread under pressure.
+
 Run one more query before you write anything down, because it decides whether the ordering above is trustworthy at all:
 
 ```sql
@@ -442,12 +444,16 @@ SELECT agent_id,
        max(recorded_at - occurred_at)                   AS worst_lag,
        count(*) FILTER (WHERE occurred_at > recorded_at) AS from_the_future
   FROM audit.agent_action
- WHERE occurred_at >= :from::timestamptz
-   AND occurred_at  < :to::timestamptz
+ WHERE (recorded_at >= :from::timestamptz AND recorded_at < :to::timestamptz)
+    OR (occurred_at >= :from::timestamptz AND occurred_at < :to::timestamptz)
  GROUP BY agent_id;
 ```
 
 `occurred_at` is claimed by the emitter; `recorded_at` is stamped by the server. This query is only worth running because of the column-level grant in step 5 — under a table-level `GRANT INSERT` the writer supplies both values, they agree by construction, and a compromised emitter passes this check while lying about every timestamp in the window. Given the grant, any row in `from_the_future`, or a `worst_lag` measured in minutes, means the timeline you were about to build is not sound. Discover that here, not in cross-examination.
+
+Look hard at the `WHERE`, because the grant alone does not save this query and an earlier version of it shipped here broken. **A skew check must never be scoped by the column it audits.** Window it on `occurred_at` and a record excuses itself from the check by lying hard enough: backdate a row to 2020, it falls outside `occurred_at >= :from`, it is never counted, and the query reports `from_the_future 0` over a store that contains one — while the row sits there carrying the server's true `recorded_at`, which is the evidence the query existed to find. The grant makes `recorded_at` trustworthy and then the predicate throws that trust away. So the window is scoped on `recorded_at`, the one value in the row the writer cannot supply, and the `OR` keeps rows the emitter *claims* fall in the window even though the store received them outside it — a late backdated replay. A row escapes both clauses only by being outside the window on the unforgeable column and the forgeable one at once, and it does not get to choose the unforgeable half. The general form of this is the same mistake as a `DEFAULT` standing in for a grant: the mechanism was present, and nobody asked what would have to be true for it to be doing nothing.
+
+That predicate scans, because `schema.sql` indexes `occurred_at` and not `recorded_at`. That is the right trade for a check you run once per investigation and the wrong one for the query in step 7; add an index on `recorded_at` if your store is large enough to feel it.
 
 ### 9. Decide retention on purpose
 
@@ -498,7 +504,7 @@ The honest summary: the first column is not a real option, and the choice betwee
 - [ ] The hash chain is verified on a schedule, and the head hash is anchored somewhere the store's operator does not control.
 - [ ] Your control documentation states that the chain cannot detect a false record appended by the writer, and names what does address that instead.
 - [ ] Audit writes commit in their own transaction, not the business transaction.
-- [ ] Timestamps are UTC and RFC 3339, and you run the emitter-versus-server skew query before trusting any timeline.
+- [ ] Timestamps are UTC and RFC 3339, and you run the emitter-versus-server skew query before trusting any timeline — and that query's window is scoped on `recorded_at`, never on `occurred_at`, since a check scoped by the column it audits lets a row exclude itself by lying. Confirmed by inserting a record backdated outside the window and watching it still be counted.
 - [ ] The correlation id is propagated to every downstream call, including calls into other services.
 - [ ] `prompt_version`, `tool_version`, and `model_id` are recorded, and `untrusted_input` defaults to true.
 - [ ] The investigation query is an index scan, confirmed with `EXPLAIN (ANALYZE, BUFFERS)` against production-scale data.
@@ -546,7 +552,7 @@ The honest summary: the first column is not a real option, and the choice betwee
 
 **Cause:** timestamps taken from local clocks, in local time, on hosts that drift. Clock synchronisation appears as a control in its own right alongside logging and monitoring in ISO/IEC 27001:2022 Annex A, and the reason is this one: every other logging control is worth less than you think if the times are not comparable.
 
-**Fix:** UTC everywhere, RFC 3339 everywhere, microsecond precision, `clock_timestamp()` on the server for `recorded_at` — with the column-level grant from step 5, or the server-side value is only a suggestion the writer can override — and the skew query from step 8 run as the first step of every investigation. When skew is real, order by `recorded_at` and say in the report that you did and why.
+**Fix:** UTC everywhere, RFC 3339 everywhere, microsecond precision, `clock_timestamp()` on the server for `recorded_at` — with the column-level grant from step 5, or the server-side value is only a suggestion the writer can override — and the skew query from step 8 — windowed on `recorded_at`, never on `occurred_at` — run as the first step of every investigation. When skew is real, order by `recorded_at` and say in the report that you did and why.
 
 ### The correlation id stops at the first hop
 
@@ -614,7 +620,15 @@ async def main() -> None:
             raise SystemExit(f"no 'records' key (keys: {sorted(result)})")
 
         records = result["records"]
-        denied = [r for r in records if r.get("decision") == "deny"]
+
+        # Same hazard one level in: the per-record names are placeholders too,
+        # and .get("decision") on a record that spells it differently prints
+        # "0 denied" over a window full of denials.
+        for position, record in enumerate(records):
+            if "decision" not in record:
+                raise SystemExit(f"record {position} has no 'decision' key")
+
+        denied = [r for r in records if r["decision"] == "deny"]
         print(f"{len(records)} actions, {len(denied)} denied")
 
 

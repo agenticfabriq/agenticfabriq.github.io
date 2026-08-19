@@ -68,21 +68,32 @@ async def main() -> None:
             )
 
         records = result["records"]
+
+        # The same hazard one level in. The docstring says response *shapes* are
+        # per deployment, not just the outer key, so the per-record names are a
+        # placeholder too. `record.get("decision")` on a record that spells it
+        # differently returns None for every row, and the summary below then
+        # prints "0 denied" over a window full of denials -- and zero denials is
+        # the number that decides whether anyone reads any further. Check the
+        # names once, loudly, instead of defaulting each one to None.
+        FIELDS = ("occurred_at", "resource", "action", "decision", "outcome")
+        for position, record in enumerate(records):
+            missing = [name for name in FIELDS if name not in record]
+            if missing:
+                raise SystemExit(
+                    f"record {position} is missing {missing} (keys: {sorted(record)}). "
+                    "Run `afctl tools list` and map these to the names your "
+                    "deployment returns -- do not read this as zero denials."
+                )
+
         for record in records:
-            print(
-                record.get("occurred_at"),
-                record.get("resource"),
-                record.get("action"),
-                record.get("decision"),
-                record.get("outcome"),
-                sep="\t",
-            )
+            print(*(record[name] for name in FIELDS), sep="\t")
 
         # Denials are the half of the trail that a log written after a
         # successful call never contains. Count them explicitly, because a
         # window with zero denials means either a well-behaved agent or a
         # policy that is not evaluating anything, and you want to know which.
-        denied = [r for r in records if r.get("decision") == "deny"]
+        denied = [r for r in records if r["decision"] == "deny"]
         print(f"{len(records)} actions, {len(denied)} denied")
 
 
