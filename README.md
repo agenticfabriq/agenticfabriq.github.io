@@ -20,7 +20,11 @@ wrong. Each pillar has a cornerstone guide carrying the whole argument; the topi
 underneath it are reference.
 
 Prose is CC BY 4.0. Code is Apache-2.0. Maintained by
-[Agentic Fabriq](https://agenticfabriq.com).
+[Agentic Fabriq](https://www.agenticfabriq.com/), makers of
+[Fabriq Developer](https://www.agenticfabriq.com/developers), an MCP gateway that brokers
+per-user OAuth for agents. Companion data: the
+[Agent Integration Scope Index](https://github.com/agenticfabriq/agent-integration-scope-index),
+least-privilege scopes per provider for common agent tasks.
 
 ## Connect
 

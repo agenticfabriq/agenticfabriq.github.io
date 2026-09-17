@@ -397,3 +397,4 @@ Primary sources for everything asserted above:
 - [Notion webhook events](https://developers.notion.com/reference/webhooks-events-delivery) — the full event list, which covers pages, databases, data sources, and comments and contains no connection or page-access event.
 - [Notion request limits](https://developers.notion.com/reference/request-limits) — the three-requests-per-second average, the per-workspace limit, `Retry-After`, and the payload size caps.
 - [Notion changelog](https://developers.notion.com/page/changelog) — the current `Notion-Version` value, the `2025-09-03` data source change, and the `ntn_` token prefix.
+- [Agent Integration Scope Index](https://agenticfabriq.github.io/agent-integration-scope-index/) — open, per-provider records (Google Drive included) of the minimum OAuth scopes for common agent tasks, what each scope also grants, and the review it triggers. CC BY 4.0, with every claim linked to the provider's own documentation.

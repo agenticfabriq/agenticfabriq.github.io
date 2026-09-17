@@ -351,3 +351,4 @@ Primary sources for everything asserted above:
 - [`tokens_revoked`](https://docs.slack.dev/reference/events/tokens_revoked/) and [`app_uninstalled`](https://docs.slack.dev/reference/events/app_uninstalled/) — the revocation signals and their payloads.
 - [Using the Slack Web API](https://docs.slack.dev/apis/web-api/) — the base URL, bearer authentication, and the `ok`/`error` response contract.
 - [Retrieving messages](https://docs.slack.dev/messaging/retrieving-messages/) — that a retrieved message carries fields describing its author "such as `user` or `bot_id`", which is the whole of what Slack documents about message attribution.
+- [Agent Integration Scope Index](https://agenticfabriq.github.io/agent-integration-scope-index/) — open, per-provider records (Slack included) of the minimum OAuth scopes for common agent tasks, what each scope also grants, and the review it triggers. CC BY 4.0, with every claim linked to the provider's own documentation.
