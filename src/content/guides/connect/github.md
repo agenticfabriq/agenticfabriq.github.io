@@ -401,3 +401,4 @@ Primary sources for everything asserted above:
 - [REST API endpoints for pull requests](https://docs.github.com/en/rest/pulls/pulls) — the create-a-pull-request body parameters and the 422 response.
 - [REST API endpoints for GitHub Actions secrets](https://docs.github.com/en/rest/actions/secrets) — what the get-a-secret response does and does not contain, and the LibSodium requirement.
 - [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets) — the rule names quoted above and the fact that bypass lists can include GitHub Apps.
+- [Agent Integration Scope Index](https://agenticfabriq.github.io/agent-integration-scope-index/) — open, per-provider records (GitHub included) of the minimum OAuth scopes for common agent tasks, what each scope also grants, and the review it triggers. CC BY 4.0, with every claim linked to the provider's own documentation.
